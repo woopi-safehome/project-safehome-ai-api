@@ -1,8 +1,11 @@
 import json
+import logging
 import os
 
 import chromadb
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+
+logger = logging.getLogger(__name__)
 
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 _DATASET_FILES = [
@@ -24,9 +27,9 @@ def init_collection(api_key: str) -> chromadb.Collection:
     )
     if collection.count() == 0:
         _seed(collection)
-        print(f"[RAG] 데이터셋 로드 완료: {collection.count()}개 청크")
+        logger.info("RAG 데이터셋 로드 완료: %d개 청크", collection.count())
     else:
-        print(f"[RAG] 기존 컬렉션 로드: {collection.count()}개 청크")
+        logger.info("RAG 기존 컬렉션 로드: %d개 청크", collection.count())
     return collection
 
 

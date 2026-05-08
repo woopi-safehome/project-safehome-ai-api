@@ -20,4 +20,4 @@ ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 5000
-CMD ["python", "app.py"]
+CMD ["gunicorn", "-w", "1", "--threads", "2", "-b", "0.0.0.0:5000", "--timeout", "120", "app:app"]

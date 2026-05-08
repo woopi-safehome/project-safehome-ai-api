@@ -1,11 +1,26 @@
 import json
+import logging
 import os
+import sentry_sdk
 from flask import Flask, jsonify, request
 from openai import OpenAI
 from dotenv import load_dotenv
 from rag import init_collection, retrieve
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+sentry_sdk.init(
+    dsn=os.getenv("SENTRY_DSN"),
+    environment=os.getenv("APP_ENV", "local"),
+    traces_sample_rate=0.2,
+    send_default_pii=False,
+)
 
 app = Flask(__name__)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -15,7 +30,8 @@ _rag_collection = None
 try:
     _rag_collection = init_collection(os.getenv("OPENAI_API_KEY"))
 except Exception as e:
-    print(f"[RAG] 초기화 실패 (RAG 없이 동작): {e}")
+    logger.warning("RAG 초기화 실패 (RAG 없이 동작): %s", e, exc_info=True)
+    sentry_sdk.capture_exception(e)
 
 # ─────────────────────────────────────────────────────────────
 # 시스템 프롬프트
@@ -265,9 +281,14 @@ def analyze_deed():
         try:
             rag_context = retrieve(_rag_collection, sections)
         except Exception as e:
-            print(f"[RAG] 검색 실패 (RAG 없이 분석): {e}")
+            logger.warning("RAG 검색 실패 (RAG 없이 분석): %s", e, exc_info=True)
+            sentry_sdk.capture_exception(e)
 
     user_prompt = _build_user_prompt(sections, rag_context, lease_type)
+
+    sentry_sdk.set_tag("lease_type", lease_type or "미지정")
+    sentry_sdk.set_tag("rag_used", _rag_collection is not None and bool(rag_context))
+    logger.info("분석 시작 — leaseType=%s, rag_used=%s", lease_type or "미지정", bool(rag_context))
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -281,8 +302,18 @@ def analyze_deed():
         response_format={"type": "json_object"},
     )
 
+    finish_reason = response.choices[0].finish_reason
     raw_content = response.choices[0].message.content
-    analysis = json.loads(raw_content)
+
+    if finish_reason == "length":
+        logger.error("LLM 응답이 토큰 한도 초과로 잘림 (finish_reason=length), 응답 길이=%d", len(raw_content))
+        return jsonify({"error": "LLM 응답이 너무 길어 처리할 수 없습니다."}), 500
+
+    try:
+        analysis = json.loads(raw_content)
+    except json.JSONDecodeError as e:
+        logger.error("LLM 응답 JSON 파싱 실패: %s | 응답 길이=%d | finish_reason=%s", e, len(raw_content), finish_reason)
+        raise
 
     # safetyChecklist와 safetyLevel을 구조적 데이터에서 결정적으로 계산
     if analysis.get("isValidDeed", False):
@@ -525,6 +556,7 @@ def _build_user_prompt(sections: dict, rag_context: str = "", lease_type: str = 
 
 @app.errorhandler(Exception)
 def handle_exception(e):
+    sentry_sdk.capture_exception(e)
     return jsonify({"error": str(e)}), 500
 
 

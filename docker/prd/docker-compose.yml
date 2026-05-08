@@ -1,17 +1,17 @@
 services:
   safehome-ai-api:
-    image: ghcr.io/${GITHUB_OWNER}/safehome-ai-api:dev
-    container_name: safehome-ai-api-dev
-    env_file: /home/woopi/project/safehome/env/.env_ai_api
+    image: ghcr.io/${GITHUB_OWNER}/safehome-ai-api:prd
+    container_name: safehome-ai-api-prd
+    env_file: /home/woopi/project/safehome/env/.env_ai_api_prd
     environment:
-      APP_ENV: dev
+      APP_ENV: prd
     volumes:
       - chroma-data:/app/chroma_db
     ports:
       - "127.0.0.1:5000:5000"
     networks:
       - safehome-net
-    restart: unless-stopped
+    restart: always
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:5000/health || exit 1"]
       interval: 30s
