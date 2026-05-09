@@ -5,6 +5,7 @@ services:
     env_file: /home/woopi/project/safehome/env/.env_ai_api
     environment:
       APP_ENV: dev
+      TZ: Asia/Seoul
     volumes:
       - chroma-data:/app/chroma_db
     ports:
