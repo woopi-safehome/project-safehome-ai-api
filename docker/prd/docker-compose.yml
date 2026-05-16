@@ -5,8 +5,10 @@ services:
     env_file: /home/woopi/project/safehome/env/.env_ai_api_prd
     environment:
       APP_ENV: prd
+      TZ: Asia/Seoul
     volumes:
       - chroma-data:/app/chroma_db
+      - logs-data:/app/logs
     ports:
       - "127.0.0.1:5000:5000"
     networks:
@@ -21,6 +23,7 @@ services:
 
 volumes:
   chroma-data:
+  logs-data:
 
 networks:
   safehome-net:

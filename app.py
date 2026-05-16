@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import sentry_sdk
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, jsonify, request
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -32,6 +34,30 @@ try:
 except Exception as e:
     logger.warning("RAG 초기화 실패 (RAG 없이 동작): %s", e, exc_info=True)
     sentry_sdk.capture_exception(e)
+
+# RAG 자동 업데이터 스케줄러
+# Flask debug 모드는 reloader가 프로세스를 2개 띄우므로 메인 프로세스에서만 실행
+_is_main_process = not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+if _is_main_process:
+    def _run_updater():
+        try:
+            from rag.updater import run as updater_run
+            updater_run()
+        except Exception as e:
+            logger.error("RAG 자동 업데이트 실패: %s", e, exc_info=True)
+            sentry_sdk.capture_exception(e)
+
+    _update_hour = int(os.getenv("RAG_UPDATE_HOUR", "3"))
+    _scheduler = BackgroundScheduler(daemon=True)
+    _scheduler.add_job(
+        _run_updater,
+        CronTrigger(hour=_update_hour, minute=0),
+        id="rag_updater",
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+    _scheduler.start()
+    logger.info("RAG 자동 업데이터 스케줄 등록 완료 (매일 %02d:00)", _update_hour)
 
 # ─────────────────────────────────────────────────────────────
 # 시스템 프롬프트
