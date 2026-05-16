@@ -4,3 +4,5 @@ openai>=1.0.0
 python-dotenv>=1.0.0
 chromadb>=0.6.0
 sentry-sdk[flask]>=2.0.0
+feedparser>=6.0.0
+requests>=2.32.0
