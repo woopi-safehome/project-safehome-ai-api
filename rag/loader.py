@@ -52,6 +52,8 @@ def _seed(collection: chromadb.Collection) -> None:
                 "source": c["source"],
                 "article": c["article"],
                 "title": c["title"],
+                "content": c["content"],
+                "risk_context": c["risk_context"],
                 "tags": ",".join(c["tags"]),
             }
             for c in chunks
