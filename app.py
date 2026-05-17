@@ -32,7 +32,7 @@ _rag_collection = None
 try:
     _rag_collection = init_collection(os.getenv("OPENAI_API_KEY"))
 except Exception as e:
-    logger.warning("RAG 초기화 실패 (RAG 없이 동작): %s", e, exc_info=True)
+    logger.warning("RAG 초기화 실패(RAG 없이 동작): %s", e, exc_info=True)
     sentry_sdk.capture_exception(e)
 
 # RAG 자동 업데이터 스케줄러
