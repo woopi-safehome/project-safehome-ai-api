@@ -42,8 +42,15 @@ _file_handler.setFormatter(logging.Formatter("%(message)s"))
 _console_handler = logging.StreamHandler(sys.stdout)
 _console_handler.setFormatter(logging.Formatter("%(message)s"))
 
-logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _console_handler])
+# basicConfig는 루트 로거에 핸들러가 없을 때만 동작하므로,
+# app.py가 먼저 basicConfig를 호출한 뒤 scheduler에서 import되면 no-op이 됨.
+# 대신 이 모듈 전용 logger에 직접 핸들러를 붙여 어느 컨텍스트에서도 파일·콘솔 출력을 보장.
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    logger.addHandler(_file_handler)
+    logger.addHandler(_console_handler)
+logger.propagate = False
 
 
 def _ts() -> str:

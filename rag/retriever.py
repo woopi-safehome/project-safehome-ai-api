@@ -13,7 +13,8 @@ _RISK_SIGNALS = [
     "법인", "공유", "지분",
 ]
 
-_DEFAULT_QUERY = "임차인 보증금 보호 전세사기 위험 대항력 우선변제권"
+_DEFAULT_QUERY_전세 = "임차인 보증금 보호 전세사기 위험 대항력 우선변제권"
+_DEFAULT_QUERY_월세 = "월세 임차인 소액보증금 최우선변제권 경매 퇴거 대항력"
 
 # 체크리스트 항목별 위험 심각도 우선순위
 # 앞에 있을수록 더 즉각적이고 치명적인 위험
@@ -32,12 +33,12 @@ _RISK_PRIORITY = [
 ]
 
 
-def retrieve(collection: chromadb.Collection, sections: dict, n_results: int = 4) -> str:
+def retrieve(collection: chromadb.Collection, sections: dict, n_results: int = 4, lease_type: str = None) -> str:
     """
     등기부 섹션에서 위험 신호를 감지하여 관련 법령·패턴 청크를 검색하고
     LLM에 주입할 컨텍스트 문자열로 반환.
     """
-    query = _build_query(sections)
+    query = _build_query(sections, lease_type)
     results = collection.query(query_texts=[query], n_results=n_results)
 
     docs = results.get("documents", [[]])[0]
@@ -154,11 +155,14 @@ def _format_chunk(meta: dict) -> dict:
     return chunk
 
 
-def _build_query(sections: dict) -> str:
+def _build_query(sections: dict, lease_type: str = None) -> str:
     """등기부 섹션 텍스트에서 위험 키워드를 추출하여 검색 쿼리 생성."""
     all_text = " ".join(
         " ".join(v) if isinstance(v, list) else str(v)
         for v in sections.values()
     )
     found = [kw for kw in _RISK_SIGNALS if kw in all_text]
-    return " ".join(found) if found else _DEFAULT_QUERY
+    if found:
+        base = " ".join(found)
+        return base + " 소액보증금 최우선변제권" if lease_type == "월세" else base
+    return _DEFAULT_QUERY_월세 if lease_type == "월세" else _DEFAULT_QUERY_전세

@@ -348,7 +348,7 @@ def analyze_deed():
     rag_context = ""
     if _rag_collection is not None:
         try:
-            rag_context = retrieve(_rag_collection, sections)
+            rag_context = retrieve(_rag_collection, sections, lease_type=lease_type)
         except Exception as e:
             logger.warning("RAG 검색 실패 (RAG 없이 분석): %s", e, exc_info=True)
             sentry_sdk.capture_exception(e)
@@ -396,7 +396,7 @@ def analyze_deed():
 
     # checklist status 결정적 계산 (LLM 사실 데이터 + LLM 서술 병합)
     checklist_analysis = llm_output.get("checklistAnalysis") or {}
-    checklist = _compute_checklist(llm_output, checklist_analysis)
+    checklist = _compute_checklist(llm_output, checklist_analysis, lease_type)
     safety_level = _compute_safety_level(checklist)
 
     # CAUTION / DANGER 일 때만 위험·주의 항목별로 법령·사례 검색 후 중복 제거
@@ -409,6 +409,13 @@ def analyze_deed():
             sentry_sdk.capture_exception(e)
 
     final_analysis = _build_response(llm_output, checklist, safety_level, references)
+
+    logger.info(
+        "분석 완료 — leaseType=%s, safetyLevel=%s, tokens=%d",
+        lease_type or "미지정",
+        safety_level,
+        response.usage.total_tokens,
+    )
 
     return jsonify({
         "analysis": final_analysis,
@@ -424,7 +431,7 @@ def analyze_deed():
 # 결정적 계산 함수들
 # ─────────────────────────────────────────────────────────────
 
-def _compute_checklist(llm_output: dict, checklist_analysis: dict) -> list:
+def _compute_checklist(llm_output: dict, checklist_analysis: dict, lease_type: str = None) -> list:
     """
     LLM이 추출한 사실 데이터로부터 11개 체크리스트 항목의 status를 결정적으로 계산하고,
     LLM이 생성한 checklistAnalysis(findings + leaseImpact)를 각 항목에 병합합니다.
@@ -464,6 +471,7 @@ def _compute_checklist(llm_output: dict, checklist_analysis: dict) -> list:
         for r in other
     )
     has_senior      = active_count > 0 or has_lease_right
+    is_wolse        = lease_type == "월세"
 
     def _item(id_, category, item, status, detail):
         entry = {
@@ -495,14 +503,14 @@ def _compute_checklist(llm_output: dict, checklist_analysis: dict) -> list:
         ),
         _item(
             "transfer_frequency", "소유권",
-            "소유권 이전 빈도 (단기간 잦은 이전 — 전세사기 주요 패턴)",
+            f"소유권 이전 빈도 (단기간 잦은 이전 — {'임대차 사기' if is_wolse else '전세사기'} 주요 패턴)",
             (
                 "위험" if freq_warning
                 else "주의" if transfer_count >= 1 and recent_date
                 else "양호"
             ),
             (
-                f"최근 3년 이내 소유권 이전이 {transfer_count}회 확인되었습니다. 갭투자 또는 전세사기 의심 패턴입니다."
+                f"최근 3년 이내 소유권 이전이 {transfer_count}회 확인되었습니다. 갭투자 또는 {'임대차 사기' if is_wolse else '전세사기'} 의심 패턴입니다."
                 if freq_warning else
                 f"최근 소유권 이전({recent_date}) 이력이 있습니다. 취득 경위를 추가 확인하세요."
                 if transfer_count >= 1 and recent_date else
@@ -520,9 +528,9 @@ def _compute_checklist(llm_output: dict, checklist_analysis: dict) -> list:
                 else "주의"
             ),
             (
-                "활성 근저당권이 설정되어 있지 않아 보증금 전액 회수 가능성이 높습니다."
+                ("활성 근저당권이 설정되어 있지 않아 경매 발생 시 퇴거 위험이 낮습니다." if is_wolse else "활성 근저당권이 설정되어 있지 않아 보증금 전액 회수 가능성이 높습니다.")
                 if active_count == 0 else
-                f"활성 근저당권 {active_count}건(채권최고액 합산 {total_amount}) 확인. 경매 시 보증금 회수가 불확실합니다."
+                f"활성 근저당권 {active_count}건(채권최고액 합산 {total_amount}) 확인. {'경매 시 퇴거 및 소액 보증금 손실 위험이 있습니다.' if is_wolse else '경매 시 보증금 회수가 불확실합니다.'}"
                 if active_count >= 3 else
                 f"활성 근저당권 {active_count}건(채권최고액 합산 {total_amount}) 확인. 임차 전 담보 비율을 확인하세요."
             ),
@@ -532,7 +540,7 @@ def _compute_checklist(llm_output: dict, checklist_analysis: dict) -> list:
             "선순위 권리 존재 여부 (선순위 담보·전세권이 임차인보다 우선 변제)",
             "주의" if has_senior else "양호",
             (
-                "선순위 근저당 또는 전세권이 확인됩니다. 경매 시 해당 권리가 임차인보다 먼저 변제됩니다."
+                ("선순위 근저당 또는 전세권이 확인됩니다. 경매 시 해당 권리가 임차인보다 먼저 변제되며, 소액 최우선변제권 적용 여부를 확인하세요." if is_wolse else "선순위 근저당 또는 전세권이 확인됩니다. 경매 시 해당 권리가 임차인보다 먼저 변제됩니다.")
                 if has_senior else
                 "선순위 담보·전세권이 없어 임차인 보증금이 우선 보호될 수 있는 조건입니다."
             ),
