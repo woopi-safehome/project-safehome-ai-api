@@ -2,12 +2,17 @@
 
 등기부등본 분석 시 관련 법령·사례를 벡터 검색으로 조회하여 LLM 컨텍스트에 주입하는 Retrieval-Augmented Generation 모듈.
 
+> **범위**: `rag/**`
+> **상위**: [AI API README](../README.md) · **연관**: 데이터셋 스키마 → [`data/README.md`](../data/README.md)
+> **검증**: 함수 시그니처·상수값은 `loader.py` / `retriever.py`와 대조
+
 ## 파일 구조
 
 ```
 rag/
 ├── loader.py     # ChromaDB 초기화 + 데이터셋 시딩
-└── retriever.py  # 위험 키워드 감지 + 벡터 검색 + 참고문헌 조회
+├── retriever.py  # 위험 키워드 감지 + 벡터 검색 + 참고문헌 조회
+└── updater.py    # 뉴스·법령 자동 수집 → ChromaDB 반영 (매일 스케줄 실행)
 ```
 
 ## loader.py

@@ -3,6 +3,10 @@
 ChromaDB에 임베딩되는 법령·사례 JSON 파일 모음.
 `rag/loader.py`의 `_DATASET_FILES`에 등록된 파일만 로드된다.
 
+> **범위**: `data/**`
+> **상위**: [AI API README](../README.md) · **연관**: 검색 로직 → [`rag/README.md`](../rag/README.md)
+> **검증**: 청크 수는 각 JSON 파일의 배열 길이, 파일 목록은 `rag/loader.py`의 `_DATASET_FILES`와 대조
+
 ## 파일 목록
 
 | 파일 | 건수 | 출처 유형 |

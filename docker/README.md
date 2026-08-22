@@ -1,5 +1,9 @@
 # docker — 컨테이너 배포 설정
 
+> **범위**: `docker/**` + `Dockerfile`
+> **상위**: [AI API README](../README.md)
+> **검증**: 환경변수 목록은 `.env.template`, 배포 단계는 `.github/workflows/deploy-ai-api-*.yml`과 대조
+
 ## 디렉토리 구조
 
 ```
