@@ -1,68 +1,38 @@
-# docker — 컨테이너 배포 설정
+# docker — 컨테이너 배포
 
-> **범위**: `docker/**` + `Dockerfile`
+> **범위**: `docker/**` + 이미지 정의
 > **상위**: [AI API README](../README.md)
-> **검증**: 환경변수 목록은 `.env.template`, 배포 단계는 `.github/workflows/deploy-ai-api-*.yml`과 대조
+> **여기 없는 것**: 환경 변수의 정확한 이름은 각 `.env.template`, 배포 단계는 워크플로 파일이 답한다.
 
-## 디렉토리 구조
+---
 
-```
-docker/
-├── dev/
-│   ├── docker-compose.yml   # 개발 서버 배포 구성
-│   └── .env.template        # 개발 서버 환경변수 템플릿
-└── prd/
-    ├── docker-compose.yml   # 운영 서버 배포 구성
-    └── .env.template        # 운영 서버 환경변수 템플릿
-```
+## 구성
 
-## 환경변수 (.env.template)
+환경별로 배포 구성과 환경 변수 템플릿을 따로 둔다. 개발과 운영은 **이미지 태그와 참조하는 환경 파일만 다르고** 나머지 구조는 같다.
 
-서버에서 실제 `.env` 파일로 복사하여 값을 채운 뒤 사용한다.
-GitHub Actions는 이 파일을 직접 사용하지 않고, **서버에 이미 존재하는 env 파일**을 참조한다.
+---
 
-| 변수 | 설명 | 필수 |
-|------|------|:---:|
-| `GITHUB_OWNER` | GitHub Container Registry 소유자 (이미지 pull용) | ✅ |
-| `OPENAI_API_KEY` | OpenAI API 키 | ✅ |
-| `SENTRY_DSN` | Sentry DSN (미설정 시 Sentry 비활성) | - |
-| `RAG_UPDATE_HOUR` | RAG 자동 업데이트 실행 시각 (0~23, 기본 3시) | - |
-| `LAW_API_KEY` | 국가법령정보 오픈API 키 (법령 자동 업데이트용) | - |
+## 알아야 할 규칙
 
-## 서버 초기 설정
+**환경 파일은 저장소가 아니라 서버에 있다.**
+템플릿은 "무엇을 채워야 하는지"만 알려준다. 실제 값이 든 파일은 서버에 미리 만들어 두고,
+배포는 그 파일을 참조한다. **템플릿에 실제 값을 채워 커밋하지 않는다.**
 
-```bash
-# 서버에서 실행
-mkdir -p /home/woopi/project/safehome/env
+**배포는 자동이다.** 이미지를 빌드해 레지스트리에 올리고, 구성 파일을 서버로 보낸 뒤
+원격에서 컨테이너를 교체한다. 수동 개입이 필요한 경우는 워크플로가 실패했을 때뿐이다.
 
-# AI API env 파일 생성
-cp docker/dev/.env.template /home/woopi/project/safehome/env/.env_ai_api
-vi /home/woopi/project/safehome/env/.env_ai_api   # 실제 값 입력
-```
+**지식 저장소는 볼륨으로 유지된다.** 컨테이너를 교체해도 살아남는다.
+지식을 새로 적재하려면 볼륨을 비워야 하며, 이미지만 갱신해서는 반영되지 않는다.
 
-## 배포 흐름
+**워커 수를 늘리지 않는다.** 지식 저장소가 프로세스마다 파일을 잡아 둘 이상이면 충돌한다.
+처리량이 필요하면 컨테이너를 늘리는 방향으로 검토하되, 볼륨 공유 문제를 먼저 확인한다.
 
-GitHub Actions (`deploy-ai-api-dev.yml`)가 자동으로 처리:
+---
 
-```
-1. Docker 이미지 빌드 → GHCR(ghcr.io) push
-2. docker-compose.yml을 서버로 SCP 전송
-3. SSH 접속 → docker compose --env-file .env_ai_api up -d
-```
+## 서버를 처음 세울 때
 
-수동 배포가 필요한 경우:
+1. 환경 파일을 둘 디렉터리를 만든다.
+2. 해당 환경의 템플릿을 복사해 실제 값을 채운다.
+3. 워크플로가 참조하는 경로와 파일명이 일치하는지 확인한다 — **어긋나면 배포는 성공하고 기동만 실패한다.**
 
-```bash
-# 서버에서 직접 실행
-cd /home/woopi/project/safehome/ai-api
-docker compose --env-file /home/woopi/project/safehome/env/.env_ai_api pull safehome-ai-api
-docker compose --env-file /home/woopi/project/safehome/env/.env_ai_api up -d --no-deps safehome-ai-api
-docker image prune -f
-```
-
-## 이미지 태그 전략
-
-| 환경 | 태그 |
-|------|------|
-| dev | `dev`, `dev-{git short sha}` |
-| prd | `latest`, `{git tag}` |
+경로와 파일명은 배포 워크플로에 적혀 있다. 여기에 복제하면 어긋나므로 그쪽을 본다.

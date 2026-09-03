@@ -1,82 +1,61 @@
-# rag — RAG 시스템
+# rag — 검색 증강(RAG) 모듈
 
-등기부등본 분석 시 관련 법령·사례를 벡터 검색으로 조회하여 LLM 컨텍스트에 주입하는 Retrieval-Augmented Generation 모듈.
+분석에 앞서 관련 법령·사례를 찾아 모델 컨텍스트에 넣고, 분석 뒤에는 판정된 항목에 근거를 붙인다.
 
 > **범위**: `rag/**`
-> **상위**: [AI API README](../README.md) · **연관**: 데이터셋 스키마 → [`data/README.md`](../data/README.md)
-> **검증**: 함수 시그니처·상수값은 `loader.py` / `retriever.py`와 대조
-
-## 파일 구조
-
-```
-rag/
-├── loader.py     # ChromaDB 초기화 + 데이터셋 시딩
-├── retriever.py  # 위험 키워드 감지 + 벡터 검색 + 참고문헌 조회
-└── updater.py    # 뉴스·법령 자동 수집 → ChromaDB 반영 (매일 스케줄 실행)
-```
-
-## loader.py
-
-### 역할
-- ChromaDB PersistentClient 초기화 (`chroma_db/` 디렉토리에 저장)
-- 컬렉션이 비어 있으면 `data/`의 JSON 데이터셋을 임베딩하여 적재
-- 임베딩 모델: `text-embedding-3-small` (OpenAI)
-
-### 주요 상수
-
-| 상수 | 값 | 설명 |
-|------|----|------|
-| `_COLLECTION_NAME` | `legal_knowledge` | ChromaDB 컬렉션 이름 |
-| `_DATASET_FILES` | `rag_legal_dataset.json`, `rag_news_cases_dataset.json` | 로드할 데이터셋 파일 |
-| `_CHROMA_PATH` | `../chroma_db` | 벡터 저장소 경로 |
-
-### 호출 방법
-
-```python
-from rag.loader import init_collection
-
-collection = init_collection(api_key=OPENAI_API_KEY)
-```
-
-최초 실행 시 전체 임베딩 (수십 초 소요), 이후 실행은 기존 컬렉션 재사용.
+> **상위**: [AI API README](../README.md) · **연관**: 데이터 형식 → [`data/README.md`](../data/README.md)
+> **여기 없는 것**: 함수 시그니처, 상수값, 키워드 목록, 우선순위 순서 — 전부 코드가 답한다.
 
 ---
 
-## retriever.py
+## 관통 흐름 — 검색은 두 단계다
 
-### 역할
-- 등기부 텍스트에서 위험 키워드(`_RISK_SIGNALS`) 감지
-- ChromaDB 코사인 유사도 검색으로 관련 법령·사례 top-N 반환
-- 체크리스트 항목별 법령 1건 + 사례 1건 조회 (`retrieve_references`)
+순서가 핵심이다. 뒤바뀌면 안 된다.
 
-### 주요 함수
+1. **키워드 감지** — 등기부 텍스트에서 위험 신호를 먼저 찾는다.
+2. **벡터 검색** — 감지된 신호로 쿼리를 만들어 유사한 청크를 가져온다.
 
-| 함수 | 설명 |
-|------|------|
-| `retrieve(collection, sections, n_results=4)` | 분석 전 LLM 컨텍스트 생성용 — 위험 키워드 기반 청크 검색 |
-| `retrieve_references(collection, checklist, safety_level)` | 분석 후 참고문헌 조회 — 체크리스트 항목당 법령·사례 1건씩 |
+키워드가 하나도 걸리지 않으면 **일반적인 기본 쿼리로 폴백**한다. 검색 결과가 비는 경우는 없다.
 
-### 위험 키워드 (`_RISK_SIGNALS`)
+검색은 분석 **전후로 두 번** 쓰이며 목적이 다르다.
 
-```
-갑구: 신탁, 가등기, 압류, 가압류, 경매, 가처분, 소유권이전, 예고등기, 처분금지, 임의경매, 강제경매, 환매
-을구: 근저당, 전세권, 임차권등기, 채권최고액, 지상권, 구분지상권
-사기 연관: 법인, 공유, 지분
-```
+| 시점 | 목적 |
+|---|---|
+| 분석 전 | 모델에게 줄 컨텍스트 확보 |
+| 분석 후 | 판정된 항목에 근거(법령·사례) 부착 |
 
-키워드가 하나도 없으면 기본 쿼리(`임차인 보증금 보호 전세사기 위험 대항력 우선변제권`) 사용.
+분석 후 검색은 **위험이 치명적인 항목부터** 처리한다. 순위 자체는 코드가 갖는다.
 
-### 위험 우선순위 (`_RISK_PRIORITY`)
+---
 
-```
-auction → trust → preliminary → seizure → provisional_seizure
-→ mortgage_scale → transfer_frequency → lease_rights
-→ senior_rights → ownership_clarity → surface_rights
-```
+## 불변식
 
-`retrieve_references` 호출 시 이 순서로 정렬하여 가장 치명적인 항목부터 처리.
+- **검색 실패가 분석을 중단시키지 않는다.** 저장소 초기화나 조회가 실패하면
+  검색 없이 모델 단독으로 분석한다. 검색은 품질 보조이지 필수 경로가 아니다.
+- **지식 저장소는 비어 있을 때만 채워진다.** 데이터를 추가해도 기존 저장소가 남아 있으면
+  **경고도 에러도 없이 반영되지 않는다.** 반영하려면 저장소를 지우고 다시 만들어야 한다.
+- **저장소는 프로세스마다 파일을 잡는다.** 워커를 여럿 띄우면 충돌한다.
 
-### RAG 초기화 실패 시
+---
 
-`app.py`에서 `init_collection` 실패를 catch하여 `collection = None`으로 처리.
-`retrieve()` 호출 없이 LLM 단독 분석으로 graceful degradation.
+## 재현성과의 긴장 — 이 모듈의 가장 중요한 사실
+
+이 모듈에는 **외부 지식을 주기적으로 수집해 저장소에 반영하는 경로**가 있다.
+스케줄러가 정해진 시각에 돌며, 실행 시각은 환경 변수로 조절한다.
+
+분석 호출 자체는 무작위성을 제거해 재현 가능하게 만들어 두었지만,
+**검색된 컨텍스트가 달라지면 결과도 달라진다.**
+
+> 따라서 "같은 입력에 같은 결과"는 **지식 저장소가 그대로일 때만** 성립한다.
+
+지식이 갱신되면 상류의 캐시에 남은 옛 결과와 새 분석이 섞일 수 있다.
+지식을 의도적으로 갱신했다면 캐시를 함께 점검한다.
+
+---
+
+## 감지 키워드를 손댈 때
+
+키워드는 검색 쿼리를 좌우하고, 검색 결과는 모델이 보는 컨텍스트를 좌우한다.
+**늘리거나 줄이면 분석 서술이 바뀐다.** 목록은 코드에 있으므로 여기서 복제하지 않는다.
+
+바꾸기 전에 위 "재현성과의 긴장"을 먼저 읽는다.

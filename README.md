@@ -4,56 +4,58 @@
 RAG로 관련 법령·전세사기 사례를 찾아 LLM 컨텍스트에 주입하고, 최종 판정은 Python이 결정적으로 계산한다.
 
 > **범위**: `project-safehome-ai-api/**`
-> **연관**: [루트 README](../README.md) (API→AI API 계약) · [API README](../project-safehome-api/README.md)
-> **검증**: 응답 스키마는 `app.py`의 `_build_response()`, 판정 규칙은 `_compute_checklist()` / `_compute_safety_level()`과 대조
+> **연관**: [API README](../project-safehome-api/README.md) — 이 서버를 호출하는 쪽 (워크스페이스에 함께 있을 때만 유효한 링크)
+> **여기 없는 것**: 함수·상수 이름과 호출 설정값 — 코드가 답한다.
+> 계약 절과 판정 규칙은 응답 조립부·판정 코드와 대조해 확인한다.
 
 ---
 
 ## TL;DR
 
-| 항목 | 값 |
-|------|-----|
-| 스택 | Python 3.11 / Flask 3.1.0 / gunicorn |
-| LLM | OpenAI `gpt-4o-mini` — `temperature=0`, `seed=42`, `max_tokens=6000`, `response_format=json_object` |
-| 임베딩 | `text-embedding-3-small` |
-| 벡터 DB | ChromaDB (PersistentClient, cosine), 컬렉션 `legal_knowledge` |
-| 진입점 | `app.py` (라우트 + 시스템 프롬프트 + 판정 로직) |
-| 호출자 | `project-safehome-api`의 `LlmAnalysisAdapter` |
+등기부 섹션 텍스트를 받아 위험 분석 결과를 구조화된 JSON으로 돌려준다.
+검색으로 법령·사례를 찾아 모델 컨텍스트에 넣고, **최종 판정은 결정적 코드가 계산한다.**
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env        # OPENAI_API_KEY 입력
-python app.py               # :5000 (개발 서버)
+cp .env.example .env        # 키 입력
+python app.py               # 개발 서버
 ```
 
-첫 실행 시 ChromaDB에 데이터셋 36개 청크를 임베딩한다 (수십 초). 이후 실행은 기존 컬렉션을 재사용한다.
+첫 실행에서 지식 데이터를 임베딩하느라 수십 초 걸린다. 이후에는 기존 저장소를 재사용한다.
+
+모델·임베딩·저장소의 구체적인 선택과 호출 설정은 코드와 `requirements.txt`가 답한다.
 
 ---
 
 ## 설계 원칙 — 역할 분리
 
-이 서비스의 핵심 결정이다. **LLM은 사실 추출과 서술만, 판정은 Python이 한다.**
+이 서비스의 핵심 결정이다. **모델은 사실 추출과 서술만, 판정은 결정적 코드가 한다.**
 
 | 담당 | 하는 일 |
 |------|--------|
-| **LLM** | 등기부에서 사실 추출 (`ownershipInfo`, `mortgageInfo`, `otherRights`, `legalRisks`) + 항목별 서술 (`checklistAnalysis`, `riskSummary`, `overallSummary`, `recommendations`) |
-| **Python** | 추출된 사실로 체크리스트 11항목의 `status` 계산 → `safetyLevel` 계산 → 참조 법령·사례 조회 → 응답 조립 |
+| **모델** | 등기부에서 사실을 추출하고, 항목별 서술과 권고 문장을 쓴다 |
+| **코드** | 추출된 사실로 체크리스트 상태를 계산 → 안전 등급 산출 → 근거 조회 → 응답 조립 |
 
-**왜**: 같은 등기부에 같은 등급이 나와야 하는데 LLM에 등급 판정을 맡기면 재현성이 없다.
-그래서 시스템 프롬프트가 `checklist`·`safetyLevel` 필드를 **응답에 넣지 말라고 명시**하고, Python이 채운다.
+**왜**: 같은 등기부에는 같은 등급이 나와야 한다. 모델에게 등급을 맡기면 재현성이 없고,
+재현성이 없으면 상류의 캐시 전략이 성립하지 않는다.
+
+그래서 시스템 프롬프트는 **판정 관련 필드를 응답에 넣지 말라고 모델에게 명시**하고, 코드가 채운다.
+모델이 판정 필드를 채워 보내기 시작하면 이 분리가 조용히 무너진다.
 
 ---
 
 ## 작업 레시피
 
-| 하려는 일 | 건드릴 파일 (순서대로) |
-|-----------|----------------------|
-| **응답 필드 추가/변경** | `app.py` `_build_response()` → 루트 README의 API→AI API 계약 → App `lib/models/deed.dart` → `build_runner` 재실행 |
-| **위험 판정 기준 변경** | `app.py` `_compute_checklist()` (해당 `_item` 블록) → 필요 시 `_compute_safety_level()` → 아래 판정 규칙 표 |
-| **체크리스트 항목 추가** | `DEED_SYSTEM_PROMPT`의 `checklistAnalysis` 스키마 → `_compute_checklist()` 리스트 → `rag/retriever.py`의 `_RISK_PRIORITY` → App 모델 |
-| **프롬프트 수정** | `DEED_SYSTEM_PROMPT` → **API의 캐시 무효화 필요** (`LlmCacheAdapter.KEY_PREFIX` 버전 업) |
-| **RAG 데이터 추가** | `data/`에 JSON 추가 → `rag/loader.py` `_DATASET_FILES` 등록 → `chroma_db/` 삭제 후 재기동 → [`data/README.md`](data/README.md) |
-| **검색 키워드 조정** | `rag/retriever.py` `_RISK_SIGNALS` → [`rag/README.md`](rag/README.md) |
+파일 이름이 아니라 **순서**가 중요하다. 실제 위치는 코드에서 찾는다.
+
+| 하려는 일 | 순서 |
+|-----------|------|
+| **응답 필드 추가·변경** | 응답 조립부 → 아래 **API 엔드포인트** 절(계약) → 하류(서버 → 앱) |
+| **위험 판정 기준 변경** | 체크리스트 판정 코드 → 필요하면 등급 산출 코드 → **상류 캐시 무효화** |
+| **체크리스트 항목 추가** | 시스템 프롬프트의 출력 스키마 → 판정 코드 → 검색 우선순위 → 앱 모델 |
+| **프롬프트 수정** | 시스템 프롬프트 → **상류 캐시 무효화** (안 하면 옛 결과가 계속 나간다) |
+| **지식 데이터 추가** | [`data/README.md`](data/README.md) 참조 — 등록과 저장소 재생성이 함께 필요 |
+| **검색 키워드 조정** | [`rag/README.md`](rag/README.md) 참조 — 재현성에 영향을 준다 |
 
 ---
 
@@ -63,8 +65,6 @@ python app.py               # :5000 (개발 서버)
 project-safehome-ai-api/
 ├── app.py              # Flask 라우트 + 시스템 프롬프트 + 결정적 판정 로직
 ├── rag/                # → rag/README.md
-│   ├── loader.py       # ChromaDB 초기화 + 데이터셋 시딩
-│   ├── retriever.py    # 위험 키워드 감지 + 벡터 검색 + 참조 조회
 │   └── updater.py      # 뉴스·법령 자동 수집 → ChromaDB 반영
 ├── data/               # RAG 데이터셋 JSON → data/README.md
 ├── chroma_db/          # 벡터 저장소 (자동 생성, 커밋 대상 아님)
@@ -85,14 +85,14 @@ project-safehome-ai-api/
 
 ### `POST /api/deed/analyze`
 
-요청 형식은 [루트 README의 계약](../README.md#-api--ai-api)이 원본이다.
+**이 절이 계약의 원본이다.** 호출하는 쪽은 여기에 맞춘다.
 
 ```jsonc
 { "sections": { "표제부": ["..."], "갑구": ["..."], "을구": ["..."] },
   "leaseType": "전세" }   // 선택: "전세" | "월세". 없으면 "미지정" 취급
 ```
 
-**응답 — 유효한 등기부인 경우** (`_build_response()` 조립 결과)
+**응답 — 유효한 등기부인 경우**
 
 ```jsonc
 {
@@ -118,7 +118,7 @@ project-safehome-ai-api/
 }
 ```
 
-> **응답에 없는 것**: `mortgageInfo`, `otherRights`, `legalRisks`는 LLM이 추출하지만 **내부 계산용**이라 응답에서 제외된다. 클라이언트에 노출하려면 `_build_response()`를 수정해야 한다.
+> **응답에 없는 것**: `mortgageInfo`, `otherRights`, `legalRisks`는 LLM이 추출하지만 **내부 계산용**이라 응답에서 제외된다. 클라이언트에 노출하려면 응답 조립부를 고치고 계약부터 합의해야 한다.
 
 **응답 — 등기부등본이 아닌 경우** (`checklist` 계산을 건너뛴다)
 
@@ -133,70 +133,65 @@ LLM 응답이 토큰 한도로 잘리면(`finish_reason == "length"`) 파싱을 
 
 ## 판정 규칙
 
-### safetyLevel (`_compute_safety_level`)
+### 등급 산출
 
-| 조건 | 등급 |
-|------|------|
-| 11개 항목 중 `위험`이 하나라도 있음 | `DANGER` |
-| `위험` 없고 `주의`가 있음 | `CAUTION` |
-| 전부 `양호` | `SAFE` |
+체크리스트 항목의 상태를 모아 하나의 등급으로 접는다. **가장 나쁜 항목이 전체를 결정한다.**
 
-### 체크리스트 11항목 (`_compute_checklist`)
+| 항목 상태 | 등급 |
+|---|---|
+| 하나라도 위험 | `DANGER` |
+| 위험 없이 주의만 있음 | `CAUTION` |
+| 전부 양호 | `SAFE` |
 
-| id | 분류 | `주의` 조건 | `위험` 조건 |
-|----|------|------------|------------|
-| `ownership_clarity` | 소유권 | 공유지분 | — |
-| `transfer_frequency` | 소유권 | 이전 이력 1회 이상 | `frequentTransferWarning`(3년 내 2회+) |
-| `mortgage_scale` | 담보권 | 활성 근저당 1~2건 | 활성 근저당 3건 이상 |
-| `senior_rights` | 담보권 | 활성 근저당 또는 전세권·임차권 존재 | — |
-| `provisional_seizure` | 법적위험 | — | 가압류·가처분·처분금지 |
-| `seizure` | 법적위험 | — | 압류 (가압류 제외) |
-| `auction` | 법적위험 | — | 경매개시결정 |
-| `lease_rights` | 특수권리 | 선순위 전세권·임차권 | — |
-| `trust` | 특수권리 | — | 신탁등기 |
-| `preliminary` | 특수권리 | — | 가등기 |
-| `surface_rights` | 특수권리 | 지상권·구분지상권 | — |
+### 체크리스트 항목
 
-판정은 LLM이 채운 `legalRisks[].type` / `otherRights[].type` 문자열의 **부분 일치**로 한다.
-그래서 시스템 프롬프트가 두 필드의 **허용값을 고정**한다. 허용값을 바꾸면 판정이 조용히 깨지므로 프롬프트와 `_compute_checklist()`를 반드시 함께 수정한다.
+응답에 나가는 항목의 식별자와 분류다. **앱이 이 값을 받아 표시하므로 계약에 준한다.**
 
-`leaseType`이 `월세`면 항목 제목과 `detail` 문구가 월세 관점으로 바뀐다 (`is_wolse` 분기). status 계산 자체는 동일하다.
+| 분류 | 항목 |
+|---|---|
+| 소유권 | `ownership_clarity` · `transfer_frequency` |
+| 담보권 | `mortgage_scale` · `senior_rights` |
+| 법적위험 | `provisional_seizure` · `seizure` · `auction` |
+| 특수권리 | `lease_rights` · `trust` · `preliminary` · `surface_rights` |
+
+각 항목을 주의·위험으로 판정하는 **임계값은 코드가 갖는다.** 여기에 복제하면 어긋난다.
+
+### 판정이 조용히 깨지는 지점
+
+판정은 모델이 채운 분류 문자열의 **부분 일치**로 이뤄진다.
+그래서 시스템 프롬프트가 그 필드들의 **허용값을 고정**한다.
+
+> 허용값을 한쪽만 바꾸면 대조가 실패하고, **에러 없이 안전한 쪽(양호)으로 떨어진다.**
+> 프롬프트와 판정 코드를 반드시 함께 고친다.
+
+임대차 유형에 따라 항목 제목과 설명 문구가 달라지지만, **상태 계산 자체는 동일하다.**
 
 ---
 
-## RAG
+## 검색 (RAG)
 
-```
-앱 시작 → init_collection()
-   ├ chroma_db/ 비어 있음 → 데이터셋 36개 청크 임베딩 저장
-   └ 이미 있음 → 기존 벡터 로드 (OpenAI 호출 없음)
+지식 저장소는 **비어 있을 때만** 채워진다. 이후 실행은 기존 벡터를 재사용하므로 임베딩 비용이 들지 않는다.
 
-분석 요청
-   ├ [분석 전] retrieve()            → 위험 키워드 감지 → 유사 청크 top-4 → 프롬프트에 주입
-   └ [분석 후] retrieve_references() → safetyLevel != SAFE 일 때만, 위험/주의 항목당
-                                       법령 1건 + 사례 1건 검색 후 중복 제거 → references
-```
+분석 한 건에서 검색은 두 번 쓰인다.
 
-| 데이터셋 | 청크 | 내용 |
-|---------|:---:|------|
-| `rag_legal_dataset.json` | 20 | 주택임대차보호법, 민법, 민사집행법, 전세사기 특별법 등 |
-| `rag_news_cases_dataset.json` | 16 | 실제 전세사기 사례 분석 |
+| 시점 | 하는 일 |
+|---|---|
+| 분석 전 | 위험 키워드를 감지해 관련 청크를 찾아 모델 컨텍스트에 주입 |
+| 분석 후 | 안전하지 않은 항목에 대해 법령·사례 근거를 붙임 |
 
-**graceful degradation**: `init_collection` 또는 `retrieve` 가 실패해도 예외를 삼키고 RAG 없이 LLM 단독으로 분석을 계속한다. RAG는 품질 향상 수단이지 필수 의존이 아니다.
+**검색 실패는 치명적이지 않다.** 초기화나 조회가 실패해도 예외를 삼키고
+모델 단독 분석으로 계속한다. 검색은 품질 향상 수단이지 필수 의존이 아니다.
 
-상세 → [`rag/README.md`](rag/README.md) · 데이터 스키마 → [`data/README.md`](data/README.md)
+### 지식이 저절로 바뀐다
 
-### 자동 업데이터
+스케줄러가 매일 외부에서 뉴스·법령을 수집해 저장소에 반영한다. 실행 시각은 환경 변수로 조절한다.
 
-APScheduler가 매일 `RAG_UPDATE_HOUR`시(기본 3시)에 `rag/updater.py`의 `run()`을 실행해 Google News RSS와 국가법령정보 API에서 수집한 내용을 ChromaDB에 반영한다.
+> 이 때문에 **"같은 입력에 같은 결과"는 지식 저장소가 그대로일 때만 성립한다.**
+> 분석 호출의 무작위성은 제거해 두었지만, 검색된 컨텍스트가 바뀌면 결과도 바뀐다.
 
-```bash
-python rag/updater.py            # 수동 실행 (최근 1일치)
-python rag/updater.py --days 3   # 최근 3일치
-```
+개발 서버를 리로더와 함께 띄우면 프로세스가 둘이 되므로, 스케줄러가 중복 등록되지 않도록 메인 프로세스에서만 등록한다.
 
-로그: `logs/update_YYYYMMDD.log`
-Flask `debug=True`는 reloader가 프로세스를 2개 띄우므로 `WERKZEUG_RUN_MAIN` 체크로 메인 프로세스에서만 스케줄러를 등록한다.
+상세 → [`rag/README.md`](rag/README.md) · 데이터 형식 → [`data/README.md`](data/README.md)
 
 ---
 
@@ -214,18 +209,13 @@ Flask `debug=True`는 reloader가 프로세스를 2개 띄우므로 `WERKZEUG_RU
 
 ## 배포
 
-`develop` push → GitHub Actions → `ghcr.io` → SSH → `docker compose up -d`.
-워크플로우: `.github/workflows/deploy-ai-api-dev.yml` / `deploy-ai-api-prd.yml`
+기본 브랜치에 push하면 자동으로 이미지를 빌드해 레지스트리에 올리고, 원격 서버에서 컨테이너를 교체한다.
+환경별로 이미지 태그와 참조하는 환경 파일이 다르다. 구성과 경로 → [`docker/README.md`](docker/README.md)
 
-| 환경 | 이미지 태그 | 컴포즈 |
-|------|-----------|--------|
-| dev | `dev`, `dev-{short sha}` | `docker/dev/` |
-| prd | `latest`, `{git tag}` | `docker/prd/` |
+**운영은 단일 워커로 띄운다.** 지식 저장소가 프로세스마다 파일을 잡기 때문이다.
+동시성이 필요하면 워커가 아니라 스레드나 컨테이너 수로 푼다.
 
-서버 환경변수 파일: `/home/woopi/project/safehome/env/.env_ai_api`
-상세 → [`docker/README.md`](docker/README.md)
-
-**운영 실행은 gunicorn**(`-w 1 --threads 2 --timeout 120`)이다. 워커가 1개인 이유는 ChromaDB PersistentClient가 프로세스별로 저장소를 잡기 때문이다. LLM 응답이 느려 타임아웃은 120초로 잡혀 있다.
+**요청 타임아웃을 넉넉히 잡는다.** 모델 응답이 느려서, 기본값으로 두면 정상 분석이 끊긴다.
 
 ---
 
@@ -233,13 +223,13 @@ Flask `debug=True`는 reloader가 프로세스를 2개 띄우므로 `WERKZEUG_RU
 
 | 함정 | 내용 |
 |------|------|
-| **프롬프트 수정 = 캐시 무효화** | API가 분석 결과를 Redis에 7일 캐싱한다. 프롬프트·판정 로직을 바꾸면 옛 결과가 계속 나간다. `LlmCacheAdapter.KEY_PREFIX`를 `v3`로 올려야 한다 |
-| **`type` 허용값 고정** | `legalRisks.type` / `otherRights.type`은 프롬프트에 열거된 값만 나와야 한다. 판정이 문자열 부분 일치라 값이 바뀌면 조용히 `양호`로 떨어진다 |
-| **`chroma_db/` 삭제 없이는 데이터 추가 안 됨** | `collection.count() == 0`일 때만 시딩한다. 데이터셋을 추가했으면 디렉토리를 지우고 재기동해야 한다 |
-| **`_seed`는 필수 키를 가정한다** | 청크에 `id/title/content/risk_context/source/article/tags`가 없으면 `KeyError`로 초기화가 통째로 실패한다 (→ RAG 없이 동작) |
-| **`id` 중복 금지** | 데이터셋 전체에서 고유해야 한다. 중복 시 ChromaDB 오류 |
-| **`temperature=0` + `seed=42`** | 같은 입력에 같은 결과를 내기 위한 설정이다. 재현성이 캐시 전략의 전제이므로 바꾸지 말 것 |
-| **`usage`는 버려진다** | API가 `analysis`만 저장한다. 토큰 사용량을 추적하려면 API 쪽도 함께 고쳐야 한다 |
+| **프롬프트 수정 = 캐시 무효화** | 상류가 분석 결과를 캐싱한다. 프롬프트나 판정 로직을 바꾸고 캐시 키 버전을 올리지 않으면 옛 결과가 만료될 때까지 계속 나간다 |
+| **분류 허용값 고정** | 판정이 문자열 부분 일치라, 프롬프트와 판정 코드 중 한쪽만 바꾸면 조용히 안전한 쪽으로 떨어진다 |
+| **저장소를 지우지 않으면 데이터가 안 들어간다** | 비어 있을 때만 적재한다. 데이터를 추가했으면 저장소를 지우고 재기동해야 한다 |
+| **청크에 필수 키가 없으면 초기화가 통째로 실패** | 한 청크의 키 누락이 전체 적재를 막는다. 결과적으로 검색 없이 동작하게 된다 |
+| **식별자 중복 금지** | 지식 데이터 전체에서 고유해야 한다. 겹치면 적재가 실패한다 |
+| **무작위성 설정 고정** | 같은 입력에 같은 결과를 내기 위한 것이다. 재현성이 상류 캐시 전략의 전제다 |
+| **토큰 사용량은 버려진다** | 상류가 분석 결과만 저장한다. 사용량을 추적하려면 상류도 함께 고쳐야 한다 |
 
 ---
 
