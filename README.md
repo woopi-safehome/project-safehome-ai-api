@@ -105,12 +105,12 @@ project-safehome-ai-api/
     "checklist": [                               // 항상 11개
       { "id": "ownership_clarity", "category": "소유권", "item": "...",
         "status": "양호 | 주의 | 위험", "detail": "...",
-        "analysis": { "findings": "...", "leaseImpact": "..." } }
+        "analysis": { "findings": "...", "leaseImpact": "..." } }   // 조건부 — 아래 참조
     ],
-    "riskSummary":     { "leaseType", "level": "낮음|보통|높음", "content" },
+    "riskSummary":     { "leaseType": "전세|월세|미지정", "level": "낮음|보통|높음", "content" },
     "overallSummary":  "5~8문장 종합 서술",
     "recommendations": [ { "priority": "필수|권장|참고", "title", "description" } ],
-    "references":      { "laws": [...], "cases": [...] }   // safetyLevel != SAFE 일 때만
+    "references":      { "laws": [...], "cases": [...] }   // 조건부 — 아래 참조
   },
   "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 }
 }
@@ -124,8 +124,21 @@ project-safehome-ai-api/
 { "analysis": { "isValidDeed": false, "reason": "..." }, "usage": { ... } }
 ```
 
-**에러**: 전역 `@app.errorhandler(Exception)` → `{"error": "..."}` + `500`.
-LLM 응답이 토큰 한도로 잘리면(`finish_reason == "length"`) 파싱을 시도하지 않고 즉시 500을 반환한다.
+**에러** — 몸체는 두 경우 모두 `{"error": "..."}` 다.
+
+| 상태 | 언제 |
+|---|---|
+| `400` | 본문이 JSON이 아니거나, `sections`가 없거나 객체가 아니다 |
+| `500` | 그 외 모든 실패. 전역 예외 핸들러가 잡는다 |
+
+LLM 응답이 토큰 한도로 잘리면(`finish_reason == "length"`) 파싱을 시도하지 않고 즉시 `500`을 반환한다.
+
+**없을 수 있는 필드가 셋이다.** 소비하는 쪽은 존재를 가정하지 말고, 없을 때 무엇을 보여줄지 정해 둔다.
+
+- `references` — `safetyLevel`이 `SAFE`가 아니고 **검색이 성공했고 결과가 있을 때만** 붙는다.
+  검색 실패는 치명적으로 다루지 않으므로, **등급만 보고 존재를 단정할 수 없다.**
+- `references.laws` · `references.cases` — 각각 결과가 있을 때만 붙는다. `references`가 있어도 **한쪽만 있을 수 있다.**
+- `checklist[].analysis` — 모델이 그 항목의 서술을 채웠을 때만 붙는다. **항목 자체는 항상 11개다.**
 
 ---
 
