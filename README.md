@@ -59,16 +59,21 @@ python app.py               # 개발 서버
 
 ## 구조
 
-```
-project-safehome-ai-api/
-├── app.py              # Flask 라우트 + 시스템 프롬프트 + 결정적 판정 로직
-├── rag/                # → rag/README.md
-│   └── updater.py      # 뉴스·법령 자동 수집 → ChromaDB 반영
-├── data/               # RAG 데이터셋 JSON → data/README.md
-├── chroma_db/          # 벡터 저장소 (자동 생성, 커밋 대상 아님)
-├── docker/             # 배포 구성 → docker/README.md
-└── Dockerfile          # gunicorn -w 1 --threads 2 --timeout 120
-```
+**애플리케이션 본체가 한 파일이다.** 라우트·시스템 프롬프트·판정 로직이 거기 함께 있다.
+나눌 만큼 커지면 위 "설계 원칙"의 경계(모델의 몫 / 코드의 몫)를 따라 나눈다.
+
+나머지는 셋이다.
+
+| 갈래 | 무엇 | 문서 |
+|---|---|---|
+| 검색 | 지식을 찾아 컨텍스트에 넣고, 판정된 항목에 근거를 붙인다 | [`rag/README.md`](rag/README.md) |
+| 지식 | 검색이 임베딩해 쓰는 데이터셋 | [`data/README.md`](data/README.md) |
+| 배포 | 컨테이너 구성과 환경 파일 | [`docker/README.md`](docker/README.md) |
+
+**벡터 저장소는 실행 중에 만들어지며 커밋 대상이 아니다.** 받아온 직후에는 없다.
+
+**실행 파라미터(워커·스레드·타임아웃)는 이미지 정의가 갖는다.** 특히 워커 수에는 제약이 있다 —
+[`docker/README.md`](docker/README.md) 참조.
 
 ---
 
@@ -185,6 +190,9 @@ LLM 응답이 토큰 한도로 잘리면(`finish_reason == "length"`) 파싱을 
 
 ## 환경 변수
 
+> ⚠️ **이 절은 계약이다.** 배포 환경이 여기에 맞춰 값을 채운다.
+> 이름이나 기본값을 바꾸면 이 표를 **같은 커밋에서** 갱신하고, 각 `.env.template`도 함께 본다.
+
 | 변수 | 필수 | 기본값 | 설명 |
 |------|:---:|--------|------|
 | `OPENAI_API_KEY` | ✅ | — | 분석·임베딩 모두 사용 |
@@ -243,7 +251,7 @@ curl -X POST http://localhost:5000/api/deed/analyze \
 
 | 알고 싶은 것 | 문서 |
 |-------------|------|
-| RAG 모듈 내부 (loader/retriever 함수·상수) | [`rag/README.md`](rag/README.md) |
+| 검색의 관통 흐름과 불변식, 재현성과의 긴장 | [`rag/README.md`](rag/README.md) |
 | 데이터셋 스키마·추가 방법 | [`data/README.md`](data/README.md) |
 | 배포 구성·서버 초기 설정 | [`docker/README.md`](docker/README.md) |
 | AI 작업 지침 | [`CLAUDE.md`](CLAUDE.md) |
