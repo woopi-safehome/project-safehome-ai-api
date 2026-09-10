@@ -116,4 +116,22 @@ jobs:
             docker compose --env-file /home/woopi/project/safehome/env/.env_ai_api pull safehome-ai-api
             docker compose --env-file /home/woopi/project/safehome/env/.env_ai_api up -d --no-deps safehome-ai-api
 
+            # 기동 확인 — 배포 성공이 기동 성공을 뜻하도록 헬스 체크를 기다린다.
+            # 컨테이너를 띄우라는 지시만으로 끝내면 기동 실패가 초록으로 지나간다.
+            CONTAINER=safehome-ai-api-dev
+            for _ in $(seq 1 36); do
+              STATUS=$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo missing)
+              case "$STATUS" in
+                healthy)  echo "기동 확인: healthy"; break ;;
+                starting) sleep 5 ;;
+                *)        echo "기동 실패 — 상태: $STATUS"
+                          docker logs --tail 80 "$CONTAINER" 2>&1 || true
+                          exit 1 ;;
+              esac
+            done
+            if [ "$STATUS" != "healthy" ]; then
+              echo "기동 확인 시간 초과 — 마지막 상태: $STATUS"
+              docker logs --tail 80 "$CONTAINER" 2>&1 || true
+              exit 1
+            fi
             docker image prune -f
