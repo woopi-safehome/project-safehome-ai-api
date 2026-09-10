@@ -230,6 +230,16 @@ LLM 응답이 토큰 한도로 잘리면(`finish_reason == "length"`) 파싱을 
 
 ## 로컬 테스트
 
+**제약 테스트**는 외부 호출도 키도 없이 돈다. 소스를 정적으로 읽어
+결정성·항목 일관성·데이터셋 스키마·워커 수를 검사한다. CI 가 배포 전에 같은 것을 돌린다.
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -q
+```
+
+**실제 호출**은 서버를 띄운 뒤 확인한다.
+
 ```bash
 curl http://localhost:5000/health
 
