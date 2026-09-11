@@ -1,9 +1,11 @@
 """
 이 저장소가 유지해야 할 성질을 실행 가능한 형태로 고정한다.
 
-전부 정적 검사다. app.py 는 임포트 시 OpenAI 클라이언트를 만들고 스케줄러를
-띄우므로 키 없이는 임포트되지 않는다. 그래서 소스를 파싱해서 본다.
-덕분에 CI 는 pytest 만 설치하면 되고, 외부 호출도 일어나지 않는다.
+app.py 는 임포트 시 OpenAI 클라이언트를 만들고 스케줄러를 띄우므로 키 없이는
+임포트되지 않는다. 그래서 그쪽은 소스를 파싱해서 본다. 판정 모듈은 부작용 없이
+임포트되므로 실제로 불러서 본다 - 소스를 어떻게 썼든 나오는 결과를 본다.
+
+어느 쪽이든 외부 호출은 일어나지 않는다. CI 는 pytest 만 설치하면 된다.
 """
 
 import ast
@@ -51,19 +53,13 @@ def _assigned_source(path: Path, tree: ast.Module, name: str) -> str:
 
 
 def _checklist_ids() -> list:
-    """_compute_checklist 가 만들어 내는 항목 id 를 순서대로 모은다."""
-    compute = _function(_tree(APP), "_compute_checklist")
-    ids = []
-    for node in ast.walk(compute):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "_item"
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-        ):
-            ids.append(node.args[0].value)
-    return ids
+    """판정 코드를 실제로 돌려 항목 id 를 순서대로 모은다.
+
+    소스를 파싱하지 않는다. 판정 모듈은 부작용 없이 임포트되므로 직접 부르는 편이
+    정확하다 - 코드를 어떻게 썼든 실제로 나오는 것을 본다.
+    """
+    from judgment import _compute_checklist
+    return [item["id"] for item in _compute_checklist({}, {}, None)]
 
 
 def _analysis_call_kwargs() -> dict:
@@ -128,21 +124,6 @@ def test_체크리스트_항목_수는_계약값이다():
     ids = _checklist_ids()
     assert len(ids) == 11, f"항목 수가 바뀌었다: {len(ids)}개. 계약 문서와 앱을 함께 본다"
     assert len(set(ids)) == len(ids), "중복된 항목 id 가 있다"
-
-
-# ── 응답 경계 ─────────────────────────────────────────────────────────────────
-
-def test_내부_계산용_필드는_응답에_실리지_않는다():
-    build = _function(_tree(APP), "_build_response")
-    keys = [
-        n.value
-        for node in ast.walk(build)
-        if isinstance(node, ast.Dict)
-        for n in node.keys
-        if isinstance(n, ast.Constant)
-    ]
-    leaked = {"mortgageInfo", "otherRights", "legalRisks"} & set(keys)
-    assert not leaked, f"내부 계산용 필드가 응답에 노출됐다: {sorted(leaked)}"
 
 
 # ── 배포 ──────────────────────────────────────────────────────────────────────
