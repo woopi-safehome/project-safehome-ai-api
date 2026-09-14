@@ -6,6 +6,8 @@
 문장이 코드 동작에 대해 사실인지는 보지 못한다. 그것은 CLAUDE.md 의 필수 절차가 맡는다.
 
 검사 대상을 목록으로 적지 않고 저장소를 걸어서 찾는다. 목록은 또 하나의 사본이 되어 갈라진다.
+그래서 검사마다 대상을 하나 이상 찾았는지 먼저 본다. 찾지 못하면 문제 목록이 비어
+아무것도 보지 않은 채 통과한다.
 """
 
 import ast
@@ -28,7 +30,7 @@ def _files(base: Path, suffix: str) -> list:
 
 DOCS = _files(ROOT, ".md")
 TEST_SOURCES = _files(TESTS, ".py")
-CONSTRAINT_TESTS = sorted(TESTS.glob("test_*constraints*.py"))
+CONSTRAINT_TESTS = sorted(p.resolve() for p in TESTS.glob("test_*constraints*.py"))
 
 
 def _rel(p: Path) -> str:
@@ -125,34 +127,39 @@ def _mapped_docs():
 
 
 def test_문서의_링크가_가리키는_파일이_있다():
-    broken = []
+    internal = []
     for doc in DOCS:
         for m in _LINK.finditer(doc.read_text(encoding="utf-8")):
             target = m.group(1).split("#")[0]
-            if not target or target.startswith(("http:", "https:", "mailto:")) or _leaves_repo(target, doc):
-                continue
-            if not (doc.parent / target).exists():
-                broken.append(f"{_rel(doc)} → {m.group(1)}")
+            if target and not target.startswith(("http:", "https:", "mailto:")) and not _leaves_repo(target, doc):
+                internal.append((doc, m.group(1), target))
+    assert internal, "링크를 하나도 찾지 못하면 아무것도 보지 않고 통과한다 — CLAUDE.md"
+
+    broken = [f"{_rel(doc)} → {raw}" for doc, raw, target in internal if not (doc.parent / target).exists()]
     assert not broken, f"깨진 링크: {broken}. 경로를 옮기면 그곳을 가리키는 문서도 함께 고친다 — CLAUDE.md"
 
 
 def test_문서와_테스트에_적힌_문서_경로가_있다():
-    missing = []
+    refs = []
     for doc in DOCS:
         for ref in re.findall(r"`([A-Za-z0-9_./-]+\.md)`", doc.read_text(encoding="utf-8")):
-            if not _leaves_repo(ref, doc) and _resolve_doc(ref, doc) is None:
-                missing.append(f"{_rel(doc)} → {ref}")
+            if not _leaves_repo(ref, doc):
+                refs.append((doc, ref, doc))
     for src in TEST_SOURCES:
         for ref in re.findall(r"[A-Za-z0-9_./-]+\.md", src.read_text(encoding="utf-8")):
-            if not ref.startswith("../") and _resolve_doc(ref) is None:
-                missing.append(f"{_rel(src)} → {ref}")
+            if not ref.startswith("../"):
+                refs.append((src, ref, None))
+    assert refs, "문서 경로를 하나도 찾지 못하면 아무것도 보지 않고 통과한다 — CLAUDE.md"
+
+    missing = [f"{_rel(where)} → {ref}" for where, ref, origin in refs if _resolve_doc(ref, origin) is None]
     assert not missing, f"없는 문서: {missing}. 문서를 옮기거나 지우면 이름을 적은 곳도 함께 고친다 — CLAUDE.md"
 
 
 def test_인용한_절이_그_문서에_있다():
-    problems = []
+    problems, examined = [], []
 
     def verify(at, ref, target, section):
+        examined.append(at)
         if target is None:
             problems.append(f"{at} → {ref} 가 없다")
         elif not _cites(target, section):
@@ -173,17 +180,24 @@ def test_인용한_절이_그_문서에_있다():
             for m in _DOC_CITATION.finditer(line):
                 verify(f"{_rel(src)}:{i}", m.group(1), _resolve_doc(m.group(1)), _cited(m, 1))
 
+    assert examined, "인용을 하나도 찾지 못하면 아무것도 보지 않고 통과한다. 인용 형식이 바뀌었을 수 있다 — CLAUDE.md"
     assert not problems, f"어긋난 인용: {problems}. 절 이름을 바꾸면 인용한 곳도 함께 고친다 — CLAUDE.md"
 
 
 def test_계약_절은_스스로_계약임을_밝힌다():
-    unmarked = []
+    contracts = []
     for doc in DOCS:
         lines = _lines(doc)
         heads = _headings(lines)
         for h in heads:
-            if "계약" in h[2] and not any("이 절은 계약이다" in l for l in lines[h[0]:_section_end(lines, heads, h)]):
-                unmarked.append(f"{_rel(doc)} → {h[2]}")
+            if "계약" in h[2]:
+                marked = any("이 절은 계약이다" in l for l in lines[h[0]:_section_end(lines, heads, h)])
+                contracts.append((doc, h[2], marked))
+    assert contracts, (
+        "이 저장소는 호출하는 쪽이 맞추는 계약을 제공한다. 하나도 찾지 못하면 표식 검사가 아무것도 보지 않는다 — README.md"
+    )
+
+    unmarked = [f"{_rel(doc)} → {title}" for doc, title, marked in contracts if not marked]
     assert not unmarked, (
         f"표식 없는 계약 절: {unmarked}. 표식이 없으면 코드를 뒤따르는 설명으로 읽혀, "
         f"어긋났을 때 코드가 아니라 문서를 고치게 된다 — CLAUDE.md"
@@ -194,6 +208,8 @@ def test_스스로_문서임을_밝힌_문서는_문서_지도에_있다():
     mapped = _mapped_docs()
     assert mapped is not None, "README.md 에 문서 지도 절이 없다 — CLAUDE.md"
     declared = [d for d in DOCS if d != README and any(l.startswith("> **범위**") for l in _lines(d)[:15])]
+    assert declared, "머리글로 문서임을 밝힌 모듈 문서를 하나도 찾지 못하면 문서 지도 검사가 아무것도 보지 않는다 — CLAUDE.md"
+
     unmapped = [_rel(d) for d in declared if d not in mapped]
     assert not unmapped, f"문서 지도에 없는 문서: {unmapped}. 찾아갈 길이 없는 문서는 읽히지 않는다 — CLAUDE.md"
 
@@ -210,11 +226,17 @@ def test_머리글이_범위와_책임을_밝힌다():
 
 
 def test_제약_테스트는_실패_메시지에_근거_문서를_담는다():
-    problems = []
+    others = [p for p in CONSTRAINT_TESTS if p != Path(__file__).resolve()]
+    assert others, "이 파일 말고 제약 테스트를 찾지 못하면 근거 문서 검사가 아무것도 보지 않고 통과한다 — CLAUDE.md"
+
+    problems, sites = [], 0
     for path in CONSTRAINT_TESTS:
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Assert) and (node.msg is None or ".md" not in ast.unparse(node.msg)):
-                problems.append(f"{_rel(path)}:{node.lineno}")
+            if isinstance(node, ast.Assert):
+                sites += 1
+                if node.msg is None or ".md" not in ast.unparse(node.msg):
+                    problems.append(f"{_rel(path)}:{node.lineno}")
+    assert sites, "검사 지점을 하나도 찾지 못하면 아무것도 보지 않고 통과한다. 검사 방식이 바뀌었을 수 있다 — CLAUDE.md"
     assert not problems, (
         f"근거 문서가 없는 검사: {problems}. 어긴 순간에 문서가 도착해야 한다. "
         f"주석이 아니라 실패 메시지에 적는다 — CLAUDE.md"

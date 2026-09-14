@@ -59,7 +59,11 @@ def _checklist_ids() -> list:
     정확하다 - 코드를 어떻게 썼든 실제로 나오는 것을 본다.
     """
     from judgment import _compute_checklist
-    return [item["id"] for item in _compute_checklist({}, {}, None)]
+    ids = [item["id"] for item in _compute_checklist({}, {}, None)]
+    assert ids, (
+        '판정 코드에서 체크리스트 항목을 하나도 찾지 못하면 아무것도 보지 않고 통과한다 — README.md 의 "체크리스트 항목"'
+    )
+    return ids
 
 
 def _analysis_call_kwargs() -> dict:
@@ -159,9 +163,15 @@ _REQUIRED_KEYS = {"id", "source", "article", "title", "content", "risk_context",
 
 
 def _chunks():
-    for path in sorted(DATA_DIR.glob("*.json")):
-        for chunk in json.loads(path.read_text(encoding="utf-8")):
-            yield path.name, chunk
+    found = [
+        (path.name, chunk)
+        for path in sorted(DATA_DIR.glob("*.json"))
+        for chunk in json.loads(path.read_text(encoding="utf-8"))
+    ]
+    assert found, (
+        '지식 데이터를 하나도 찾지 못하면 아무것도 보지 않고 통과한다 — data/README.md 의 "청크 스키마"'
+    )
+    return found
 
 
 def test_모든_청크가_필수_키를_갖는다():
