@@ -192,3 +192,34 @@ def test_청크_id_는_전체에서_유일하다():
         cid = chunk.get("id")
         (dup.append(cid) if cid in seen else seen.add(cid))
     assert not dup, f'중복된 청크 id: {dup}. 겹치면 적재가 실패한다 — data/README.md 의 "조용히 깨지는 것들"'
+
+
+# ── 이미지 구성 ───────────────────────────────────────────────────────────────
+# 앱이 불러오는 로컬 모듈이 이미지에 빠지면, 테스트는 초록인데 컨테이너만 뜨지 못한다.
+
+def _local_imports() -> set:
+    names = set()
+    for path in [APP, *sorted((ROOT / "rag").glob("*.py"))]:
+        for node in ast.walk(_tree(path)):
+            if isinstance(node, ast.Import):
+                names.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names.add(node.module.split(".")[0])
+    return {n for n in names if (ROOT / f"{n}.py").is_file() or (ROOT / n / "__init__.py").is_file()}
+
+
+def test_이미지가_앱이_불러오는_로컬_모듈을_모두_담는다():
+    local = _local_imports()
+    assert local, (
+        '앱이 불러오는 로컬 모듈을 하나도 찾지 못하면 아무것도 보지 않고 통과한다 — docker/README.md 의 "알아야 할 규칙"'
+    )
+    copied = set()
+    for line in DOCKERFILE.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^COPY\s+(?!--from)(\S+)", line)
+        if m:
+            copied.add(m.group(1).rstrip("/").removesuffix(".py"))
+    missing = sorted(local - copied)
+    assert not missing, (
+        f"이미지에 빠진 모듈: {missing}. 테스트는 통과해도 컨테이너가 뜨지 못한다 — "
+        'docker/README.md 의 "알아야 할 규칙"'
+    )

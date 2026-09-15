@@ -31,8 +31,9 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Run constraint tests
-        run: pytest tests/ -q
+      # 로컬과 같은 파일을 실행한다. 명령이 다르면 로컬 통과가 CI 통과를 뜻하지 않는다.
+      - name: Run tests
+        run: bash scripts/verify.sh
 
   build-and-push:
     name: Build & Push Docker Image
@@ -67,6 +68,21 @@ jobs:
           tags: |
             type=raw,value=dev
             type=sha,prefix=dev-,format=short
+
+      # 올리기 전에 이미지를 실제로 띄워, 배포 구성의 헬스 체크를 컨테이너 안에서 돌린다.
+      # 테스트는 이미지를 보지 않는다 — 모듈이 빠지거나 헬스 체크 도구가 없으면 여기서 걸린다.
+      - name: Build image for smoke test
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: safehome-ai-api:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: python3 scripts/smoke_image.py safehome-ai-api:smoke
 
       - name: Build and push
         uses: docker/build-push-action@v5

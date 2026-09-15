@@ -13,6 +13,7 @@ WORKDIR /app
 
 COPY --from=builder /root/.local /root/.local
 COPY app.py .
+COPY judgment.py .
 COPY rag/ rag/
 COPY data/ data/
 
