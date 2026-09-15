@@ -83,20 +83,27 @@ def test_분석_호출의_무작위성이_제거되어_있다():
     kwargs = _analysis_call_kwargs()
 
     temperature = kwargs.get("temperature")
-    assert isinstance(temperature, ast.Constant), "temperature 가 상수로 고정돼 있지 않다"
-    assert temperature.value == 0, f"temperature 가 0 이 아니다: {temperature.value}"
+    assert isinstance(temperature, ast.Constant), (
+        "temperature 가 상수로 고정돼 있지 않다. 같은 입력에 같은 결과가 나와야 상류 캐시가 성립한다 — CLAUDE.md"
+    )
+    assert temperature.value == 0, (
+        f"temperature 가 0 이 아니다: {temperature.value}. 같은 입력에 같은 결과가 나와야 상류 캐시가 성립한다 — CLAUDE.md"
+    )
 
     seed = kwargs.get("seed")
-    assert isinstance(seed, ast.Constant), "seed 가 상수로 고정돼 있지 않다"
-    assert isinstance(seed.value, int)
+    assert isinstance(seed, ast.Constant), (
+        "seed 가 상수로 고정돼 있지 않다. 같은 입력에 같은 결과가 나와야 상류 캐시가 성립한다 — CLAUDE.md"
+    )
+    assert isinstance(seed.value, int), f"seed 가 정수가 아니다: {seed.value!r} — CLAUDE.md"
 
 
 def test_모델_출력을_구조화_형식으로_강제한다():
-    # 자유 텍스트를 받아 긁어내면 파싱이 조용히 어긋난다
     response_format = _analysis_call_kwargs().get("response_format")
-    assert isinstance(response_format, ast.Dict), "response_format 이 지정돼 있지 않다"
+    assert isinstance(response_format, ast.Dict), (
+        "response_format 이 지정돼 있지 않다. 자유 텍스트를 긁어내면 파싱이 조용히 어긋난다 — CLAUDE.md"
+    )
     values = [v.value for v in response_format.values if isinstance(v, ast.Constant)]
-    assert "json_object" in values, f"구조화 출력이 아니다: {values}"
+    assert "json_object" in values, f"구조화 출력이 아니다: {values} — CLAUDE.md"
 
 
 # ── 체크리스트 항목의 일관성 ──────────────────────────────────────────────────
@@ -109,32 +116,38 @@ def test_체크리스트_id_가_검색_우선순위와_일치한다():
     priority = set(_assigned_list(_tree(RETRIEVER), "_RISK_PRIORITY"))
     assert ids == priority, (
         f"판정 코드에만 있는 항목={sorted(ids - priority)}, "
-        f"우선순위에만 있는 항목={sorted(priority - ids)}"
+        f"우선순위에만 있는 항목={sorted(priority - ids)}. "
+        '항목을 더할 때 고칠 곳과 순서 — README.md 의 "작업 레시피"'
     )
 
 
 def test_체크리스트_id_가_시스템_프롬프트에_모두_등장한다():
     prompt = _assigned_source(APP, _tree(APP), "DEED_SYSTEM_PROMPT")
     missing = [i for i in _checklist_ids() if f'"{i}"' not in prompt]
-    assert not missing, f"프롬프트가 서술을 요구하지 않는 항목: {missing}"
+    assert not missing, (
+        f"프롬프트가 서술을 요구하지 않는 항목: {missing}. "
+        '항목을 더할 때 고칠 곳과 순서 — README.md 의 "작업 레시피"'
+    )
 
 
 def test_체크리스트_항목_수는_계약값이다():
-    # 응답의 checklist 길이는 앱이 맞추는 계약이다 (README 의 API→AI API 계약)
     ids = _checklist_ids()
-    assert len(ids) == 11, f"항목 수가 바뀌었다: {len(ids)}개. 계약 문서와 앱을 함께 본다"
-    assert len(set(ids)) == len(ids), "중복된 항목 id 가 있다"
+    assert len(ids) == 11, (
+        f'항목 수가 바뀌었다: {len(ids)}개. 앱이 이 수에 맞춘다 — README.md 의 "API→AI API 계약"'
+    )
+    assert len(set(ids)) == len(ids), '중복된 항목 id 가 있다 — README.md 의 "체크리스트 항목"'
 
 
 # ── 배포 ──────────────────────────────────────────────────────────────────────
 
 def test_워커는_하나다():
-    # 벡터 저장소가 프로세스마다 저장 파일을 잡아 둘 이상이면 충돌한다
     cmd = [l for l in DOCKERFILE.read_text(encoding="utf-8").splitlines() if l.startswith("CMD")]
-    assert cmd, "Dockerfile 에 CMD 가 없다"
+    assert cmd, 'Dockerfile 에 CMD 가 없다 — rag/README.md 의 "불변식"'
     tokens = re.findall(r'"([^"]*)"', cmd[0])
-    assert "-w" in tokens, "워커 수가 명시돼 있지 않다"
-    assert tokens[tokens.index("-w") + 1] == "1", "워커가 1이 아니다 — rag/README.md 의 불변식 참조"
+    assert "-w" in tokens, '워커 수가 명시돼 있지 않다 — rag/README.md 의 "불변식"'
+    assert tokens[tokens.index("-w") + 1] == "1", (
+        '워커가 1이 아니다. 벡터 저장소가 프로세스마다 저장 파일을 잡아 둘 이상이면 충돌한다 — rag/README.md 의 "불변식"'
+    )
 
 
 # ── 지식 데이터 ───────────────────────────────────────────────────────────────
@@ -157,7 +170,10 @@ def test_모든_청크가_필수_키를_갖는다():
         for name, chunk in _chunks()
         if not _REQUIRED_KEYS <= set(chunk)
     ]
-    assert not missing, f"필수 키가 빠진 청크: {missing}"
+    assert not missing, (
+        f"필수 키가 빠진 청크: {missing}. 하나라도 빠지면 적재가 통째로 중단된다 — "
+        'data/README.md 의 "청크 스키마"'
+    )
 
 
 def test_청크_id_는_전체에서_유일하다():
@@ -165,4 +181,4 @@ def test_청크_id_는_전체에서_유일하다():
     for _, chunk in _chunks():
         cid = chunk.get("id")
         (dup.append(cid) if cid in seen else seen.add(cid))
-    assert not dup, f"중복된 청크 id: {dup}"
+    assert not dup, f'중복된 청크 id: {dup}. 겹치면 적재가 실패한다 — data/README.md 의 "조용히 깨지는 것들"'
