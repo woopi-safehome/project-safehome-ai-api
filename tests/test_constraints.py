@@ -66,17 +66,16 @@ def _checklist_ids() -> list:
     return ids
 
 
-def _analysis_call_kwargs() -> dict:
-    """analyze_deed 안의 모델 호출에 넘기는 인자를 모은다."""
+def _analysis_calls_kwargs() -> list:
+    """analyze_deed 안의 모델 호출마다 넘기는 인자를 모은다. 추출과 서술 두 호출이 있다."""
     analyze = _function(_tree(APP), "analyze_deed")
-    for node in ast.walk(analyze):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "create"
-        ):
-            return {kw.arg: kw.value for kw in node.keywords if kw.arg}
-    raise AssertionError("analyze_deed 안에서 모델 호출을 찾지 못했다")
+    calls = [
+        {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        for node in ast.walk(analyze)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "create"
+    ]
+    assert calls, "analyze_deed 안에서 모델 호출을 찾지 못하면 아무것도 보지 않고 통과한다 — CLAUDE.md"
+    return calls
 
 
 # ── 결정성 ────────────────────────────────────────────────────────────────────
@@ -84,30 +83,31 @@ def _analysis_call_kwargs() -> dict:
 # 이 값이 흔들리면 캐시는 살아 있는데 내용이 달라지므로 아무 에러도 나지 않는다.
 
 def test_분석_호출의_무작위성이_제거되어_있다():
-    kwargs = _analysis_call_kwargs()
+    # 추출과 서술 모두 — 추출이 흔들리면 판정이, 서술이 흔들리면 같은 등기부의 설명이 매번 달라진다
+    for kwargs in _analysis_calls_kwargs():
+        temperature = kwargs.get("temperature")
+        assert isinstance(temperature, ast.Constant), (
+            "temperature 가 상수로 고정돼 있지 않다. 같은 입력에 같은 결과가 나와야 상류 캐시가 성립한다 — CLAUDE.md"
+        )
+        assert temperature.value == 0, (
+            f"temperature 가 0 이 아니다: {temperature.value}. 같은 입력에 같은 결과가 나와야 상류 캐시가 성립한다 — CLAUDE.md"
+        )
 
-    temperature = kwargs.get("temperature")
-    assert isinstance(temperature, ast.Constant), (
-        "temperature 가 상수로 고정돼 있지 않다. 같은 입력에 같은 결과가 나와야 상류 캐시가 성립한다 — CLAUDE.md"
-    )
-    assert temperature.value == 0, (
-        f"temperature 가 0 이 아니다: {temperature.value}. 같은 입력에 같은 결과가 나와야 상류 캐시가 성립한다 — CLAUDE.md"
-    )
-
-    seed = kwargs.get("seed")
-    assert isinstance(seed, ast.Constant), (
-        "seed 가 상수로 고정돼 있지 않다. 같은 입력에 같은 결과가 나와야 상류 캐시가 성립한다 — CLAUDE.md"
-    )
-    assert isinstance(seed.value, int), f"seed 가 정수가 아니다: {seed.value!r} — CLAUDE.md"
+        seed = kwargs.get("seed")
+        assert isinstance(seed, ast.Constant), (
+            "seed 가 상수로 고정돼 있지 않다. 같은 입력에 같은 결과가 나와야 상류 캐시가 성립한다 — CLAUDE.md"
+        )
+        assert isinstance(seed.value, int), f"seed 가 정수가 아니다: {seed.value!r} — CLAUDE.md"
 
 
 def test_모델_출력을_구조화_형식으로_강제한다():
-    response_format = _analysis_call_kwargs().get("response_format")
-    assert isinstance(response_format, ast.Dict), (
-        "response_format 이 지정돼 있지 않다. 자유 텍스트를 긁어내면 파싱이 조용히 어긋난다 — CLAUDE.md"
-    )
-    values = [v.value for v in response_format.values if isinstance(v, ast.Constant)]
-    assert "json_object" in values, f"구조화 출력이 아니다: {values} — CLAUDE.md"
+    for kwargs in _analysis_calls_kwargs():
+        response_format = kwargs.get("response_format")
+        assert isinstance(response_format, ast.Dict), (
+            "response_format 이 지정돼 있지 않다. 자유 텍스트를 긁어내면 파싱이 조용히 어긋난다 — CLAUDE.md"
+        )
+        values = [v.value for v in response_format.values if isinstance(v, ast.Constant)]
+        assert "json_object" in values, f"구조화 출력이 아니다: {values} — CLAUDE.md"
 
 
 # ── 체크리스트 항목의 일관성 ──────────────────────────────────────────────────
@@ -126,10 +126,10 @@ def test_체크리스트_id_가_검색_우선순위와_일치한다():
 
 
 def test_체크리스트_id_가_시스템_프롬프트에_모두_등장한다():
-    prompt = _assigned_source(APP, _tree(APP), "DEED_SYSTEM_PROMPT")
+    prompt = _assigned_source(APP, _tree(APP), "NARRATIVE_SYSTEM_PROMPT")
     missing = [i for i in _checklist_ids() if f'"{i}"' not in prompt]
     assert not missing, (
-        f"프롬프트가 서술을 요구하지 않는 항목: {missing}. "
+        f"서술 프롬프트가 서술을 요구하지 않는 항목: {missing}. "
         '항목을 더할 때 고칠 곳과 순서 — README.md 의 "작업 레시피"'
     )
 

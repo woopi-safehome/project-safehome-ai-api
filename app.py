@@ -2,13 +2,14 @@ import json
 import logging
 import os
 import sentry_sdk
+from datetime import date
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, jsonify, request
 from openai import OpenAI
 from dotenv import load_dotenv
 from rag import init_collection, retrieve, retrieve_references
-from judgment import _compute_checklist, _compute_safety_level, _build_response
+from judgment import _build_response, _compute_checklist, _compute_safety_level, _clean_narrative, _derive_facts, _merge_facts, _note_cancelled, _risk_level
 
 load_dotenv()
 
@@ -61,189 +62,114 @@ if _is_main_process:
     logger.info("RAG 자동 업데이터 스케줄 등록 완료 (매일 %02d:00)", _update_hour)
 
 # ─────────────────────────────────────────────────────────────
-# 시스템 프롬프트
-# LLM 역할: 사실 추출 + 유형별 서술 생성
-# Python 역할: checklist status 판정 + safetyLevel 계산 (결정적)
+# 시스템 프롬프트 — 호출이 둘이다
+#
+#   1. 추출: 모델이 등기 항목을 순위번호·등기목적·날짜·금액 그대로 베껴 적는다. 판단하지 않는다.
+#   2. (코드) 말소를 짝지어 지우고, 건수·합계·이전 횟수를 세고, 항목 상태와 등급을 정한다.
+#   3. 서술: 모델이 **코드가 확정한 사실만** 받아 요약·설명·권고를 쓴다. 원문을 다시 주지 않는다.
+#
+# 서술 호출에 원문을 주지 않는 이유: 원문을 보면 모델이 말소된 권리를 살아 있는 것처럼 다시 쓴다.
+# 확정된 사실만 주면 틀린 말을 할 근거가 없다. 배경: README.md 의 "설계 원칙 — 역할 분리"
 # ─────────────────────────────────────────────────────────────
-DEED_SYSTEM_PROMPT = """당신은 대한민국 부동산 등기부등본 분석 전문가입니다.
-이 서비스의 목적은 전세·월세 계약을 앞둔 임차인이 사기 피해를 입지 않도록, 등기부등본에서 위험 신호를 사전에 발견하는 것입니다.
-임차인의 보증금 보호 관점에서 빠짐없이 분석하고, 반드시 아래 JSON 스키마 형식으로만 응답하세요.
-JSON 외의 다른 텍스트는 절대 포함하지 마세요.
-
-[임대차 유형]
-사용자 메시지에 leaseType이 명시된 경우 해당 유형(월세/전세)에 맞는 분석을 수행하세요.
-leaseType이 없거나 "미지정"인 경우 전세·월세 공통 관점으로 분석하세요.
+EXTRACT_SYSTEM_PROMPT = """당신은 대한민국 부동산 등기부등본을 옮겨 적는 사람입니다.
+판단하거나 요약하지 말고, 등기부에 적힌 항목을 빠짐없이 그대로 옮기세요.
+반드시 아래 JSON 스키마 형식으로만 응답하고, JSON 외의 텍스트는 포함하지 마세요.
 
 ═══════════════════════════════════════
-[입력 유효성 검사 - 최우선 처리]
+[입력 유효성 검사 — 최우선]
 ═══════════════════════════════════════
-입력된 내용이 대한민국 부동산 등기부등본이 아닌 경우 (표제부·갑구·을구 구조가 없거나, 부동산과 무관한 내용인 경우),
-아래 형식으로만 응답하고 다른 분석은 수행하지 마세요:
-{
-  "isValidDeed": false,
-  "reason": "등기부등본이 아닌 이유를 한 문장으로 설명"
-}
+입력이 대한민국 부동산 등기부등본이 아니면(표제부·갑구·을구 구조가 없거나 부동산과 무관하면) 아래만 응답하세요:
+{ "isValidDeed": false, "reason": "등기부등본이 아닌 이유를 한 문장으로" }
 
 ═══════════════════════════════════════
-[분석 원칙]
+[옮겨 적는 규칙 — 가장 중요]
 ═══════════════════════════════════════
-1. 등기부에 기재된 사실을 정확하게 추출하는 것이 최우선이다.
-2. 확인할 수 없는 항목은 null로 표기한다.
-3. 모든 금액은 원화(원) 단위로 표기한다.
-4. legalRisks와 otherRights의 type 필드는 아래 허용값 중 하나만 사용한다.
+1. 갑구와 을구의 **모든 순위번호 항목**을 순서대로 entries 에 넣습니다. 하나도 빼지 마세요.
+2. **말소된 항목도, 말소하는 항목도 모두 넣습니다.** PDF 에서는 말소 표시(취소선)가 보이지 않습니다.
+   "3번압류등기말소", "1번근저당권설정, 2번근저당권설정등기말소" 같은 항목이 앞 항목을 지웁니다.
+   어느 것이 지워졌는지는 판단하지 말고, 이런 항목을 적힌 그대로 옮기기만 하세요.
+3. 부기등기(순위번호 "1-1", "2-3" 등)와 "N번근저당권변경", "N번근저당권이전" 도 그대로 넣습니다.
+4. purpose 는 등기목적 칸의 글자를 **그대로** 적습니다. 바꿔 쓰거나 줄이지 마세요.
+   등기목적이 두 줄로 나뉘어 있으면(예: "3번근저당권설정등" 다음 줄 "기말소") **이어 붙여 한 칸에** 적습니다.
+5. 확인할 수 없는 값은 null 로 둡니다.
 
 ═══════════════════════════════════════
-[legalRisks.type 허용값 — 정확히 일치해야 함]
-═══════════════════════════════════════
-가압류 / 압류 / 가처분 / 처분금지가처분 / 임의경매개시결정 / 강제경매개시결정 / 예고등기
-
-═══════════════════════════════════════
-[otherRights.type 허용값 — 정확히 일치해야 함]
-═══════════════════════════════════════
-전세권 / 임차권 / 지상권 / 구분지상권 / 지역권 / 신탁 / 가등기 / 환매특약
-
-═══════════════════════════════════════
-[유효한 등기부등본인 경우 응답 JSON 스키마]
+[응답 JSON 스키마 — 유효한 등기부인 경우]
 ═══════════════════════════════════════
 {
   "isValidDeed": true,
-
   "propertyInfo": {
     "address": "소재지 전체 주소",
     "type": "부동산 종류 (토지/건물/집합건물/구분건물)",
     "area": "면적 (㎡ 및 평 환산 포함, 예: 59.91㎡ / 약 18.1평)",
     "structure": "구조 (철근콘크리트/목조 등)",
     "purpose": "주 용도 (아파트/단독주택/다세대/상가/사무실 등)",
-    "buildYear": "건축연도 (확인 가능 시, 불가 시 null)"
+    "buildYear": "건축연도 (확인 불가 시 null)"
   },
-
   "ownershipInfo": {
     "currentOwner": "현재 소유자명",
     "ownerType": "단독소유 또는 공유",
-    "shareRatio": "공유 시 해당 지분 비율 (예: 1/2), 단독 시 null",
-    "recentTransferDate": "가장 최근 소유권 취득일 (YYYY-MM-DD)",
-    "recentTransferCause": "가장 최근 취득 원인 (매매/상속/증여/경매/판결 등)",
-    "transferCount": 0,
-    "frequentTransferWarning": false,
-    "transferHistory": [
-      {
-        "owner": "소유자명",
-        "acquisitionDate": "취득일 (YYYY-MM-DD 또는 확인불가)",
-        "acquisitionCause": "취득원인",
-        "isCurrent": false
-      }
-    ]
+    "shareRatio": "공유 시 해당 지분 비율 (예: 1/2), 단독 시 null"
   },
-
-  "mortgageInfo": {
-    "totalCount": 0,
-    "activeCount": 0,
-    "totalMaxClaimAmount": "활성 근저당 합산 채권최고액 (없으면 '없음')",
-    "riskComment": "담보 현황에 대한 임차인 관점 위험 코멘트 (안전하면 안전 사유 명시)",
-    "details": [
-      {
-        "rank": 1,
-        "type": "근저당권 또는 저당권",
-        "creditor": "채권자 (금융기관명 또는 개인)",
-        "maxClaimAmount": "채권최고액",
-        "registrationDate": "설정일 (YYYY-MM-DD)",
-        "isActive": true,
-        "note": "특이사항 (공동담보/채권양도/일부말소 등, 없으면 null)"
-      }
-    ]
-  },
-
-  "otherRights": [
+  "entries": [
     {
-      "type": "위 허용값 중 하나",
-      "holder": "권리자",
-      "amount": "금액 (있는 경우, 없으면 null)",
-      "period": "존속기간 (있는 경우, 없으면 null)",
-      "registrationDate": "등기일 (YYYY-MM-DD)",
-      "tenantImpact": "임차인 보증금에 미치는 영향 설명"
+      "section": "갑구 또는 을구",
+      "rank": "순위번호 그대로 (예: \\"3\\", \\"1-3\\")",
+      "purpose": "등기목적 그대로 (예: \\"압류\\", \\"3번압류등기말소\\", \\"근저당권설정\\", \\"소유권이전\\")",
+      "date": "접수일 (YYYY-MM-DD)",
+      "cause": "등기원인 그대로 (예: \\"2013년10월25일 매매\\", \\"2019년1월2일 해제\\")",
+      "holder": "권리자 (소유자·근저당권자·채권자·권리자 이름)",
+      "amount": "채권최고액·청구금액·전세금 등 금액 그대로 (없으면 null)"
     }
-  ],
+  ]
+}"""
 
-  "legalRisks": [
-    {
-      "type": "위 허용값 중 하나",
-      "claimant": "청구인 또는 압류기관 (국세청/지자체/금융기관/개인 등)",
-      "amount": "청구금액 또는 압류금액 (있는 경우, 없으면 null)",
-      "registrationDate": "등기일 (YYYY-MM-DD)",
-      "severity": "HIGH 또는 MEDIUM 또는 LOW",
-      "description": "위험 내용과 임차인 보증금에 미치는 구체적 영향 설명"
-    }
-  ],
+NARRATIVE_SYSTEM_PROMPT = """당신은 대한민국 부동산 등기부등본 분석 전문가입니다.
+이 서비스의 목적은 전세·월세 계약을 앞둔 임차인이 사기 피해를 입지 않도록 위험 신호를 알기 쉽게 알려 주는 것입니다.
+반드시 아래 JSON 스키마 형식으로만 응답하고, JSON 외의 텍스트는 포함하지 마세요.
 
-  "analysisSummary": "2~3문장. 이 등기부등본에서 발견된 가장 중요한 위험 신호 또는 안전 사유를 핵심만 요약.",
+═══════════════════════════════════════
+[서술 원칙 — 가장 중요]
+═══════════════════════════════════════
+1. 사용자 메시지의 [확정된 사실]만 근거로 씁니다. **등급과 항목 상태는 이미 정해져 있습니다.** 바꾸거나 다르게 평가하지 마세요.
+2. 확정된 사실에 없는 권리를 있다고 쓰지 마세요.
+3. cancelledRights 는 **이미 말소된 과거 이력**입니다. 현재 위험처럼 쓰지 마세요.
+   다만 그 권리에 해당하는 항목(압류 → seizure, 가압류·가처분 → provisional_seizure, 근저당 → mortgage_scale 등)의 findings 에는
+   "과거 N건 있었으나 모두 말소되었다"처럼 **반드시 함께 적습니다.** 임차인에게는 과거 체납·분쟁 이력도 참고가 됩니다.
+4. 건수와 금액은 확정된 사실의 숫자를 그대로 씁니다. 다시 세거나 더하지 마세요.
+5. leaseType(전세/월세/미지정)에 맞는 관점으로 씁니다.
+6. 참고 자료(법령·사례)가 주어지면 서술의 근거로 활용합니다.
+
+═══════════════════════════════════════
+[응답 JSON 스키마]
+═══════════════════════════════════════
+{
+  "analysisSummary": "2~3문장. 가장 중요한 위험 신호 또는 안전 사유를 핵심만.",
 
   "checklistAnalysis": {
-    "ownership_clarity": {
-      "findings": "소유권 구조에 대한 등기부 사실 기술 (단독/공유, 지분 비율 등)",
-      "leaseImpact": "leaseType 관점에서 이 소유권 구조가 임차인 보증금에 미치는 영향"
-    },
-    "transfer_frequency": {
-      "findings": "소유권 이전 이력에 대한 사실 기술 (이전 횟수, 시기, 원인)",
-      "leaseImpact": "leaseType 관점에서 이전 이력이 갭투자·전세사기 위험과 어떻게 연결되는지"
-    },
-    "mortgage_scale": {
-      "findings": "근저당 설정 현황 사실 기술 (건수, 채권최고액 합산, 채권자 등)",
-      "leaseImpact": "leaseType 관점에서 담보 규모가 보증금 회수에 미치는 영향 (전세: 보증금 전액 위험, 월세: 경매 시 퇴거·소액 보증금 위험)"
-    },
-    "senior_rights": {
-      "findings": "선순위 근저당·전세권·임차권 존재 여부 사실 기술",
-      "leaseImpact": "leaseType 관점에서 선순위 권리로 인해 임차인이 후순위가 될 경우의 영향"
-    },
-    "provisional_seizure": {
-      "findings": "가압류·가처분 등기 존재 여부 및 내용 사실 기술",
-      "leaseImpact": "leaseType 관점에서 채무 분쟁이 보증금 반환에 미치는 위험"
-    },
-    "seizure": {
-      "findings": "압류 등기 존재 여부 및 압류 주체(국세청/지자체 등) 사실 기술",
-      "leaseImpact": "leaseType 관점에서 세금 체납으로 인한 국가 우선 변제 위험"
-    },
-    "auction": {
-      "findings": "경매개시결정 등기 존재 여부 및 경매 유형 사실 기술",
-      "leaseImpact": "leaseType 관점에서 경매 진행 시 보증금 전액 손실 가능성"
-    },
-    "lease_rights": {
-      "findings": "선순위 전세권·임차권 등기 존재 여부 및 금액 사실 기술",
-      "leaseImpact": "leaseType 관점에서 기존 임차인 보증금이 신규 임차인보다 우선 변제되는 위험"
-    },
-    "trust": {
-      "findings": "신탁등기 존재 여부 및 수탁자 정보 사실 기술",
-      "leaseImpact": "leaseType 관점에서 수탁자 동의 없는 임대차 계약의 대항력 위험"
-    },
-    "preliminary": {
-      "findings": "가등기 존재 여부 및 종류(소유권이전청구권 가등기 여부) 사실 기술",
-      "leaseImpact": "leaseType 관점에서 본등기 완료 시 임차권 소멸 위험"
-    },
-    "surface_rights": {
-      "findings": "지상권·구분지상권 설정 여부 및 내용 사실 기술",
-      "leaseImpact": "leaseType 관점에서 지상권이 임차 생활에 미치는 제한"
-    }
+    "ownership_clarity": { "findings": "소유권 구조 사실", "leaseImpact": "임차인 보증금에 미치는 영향" },
+    "transfer_frequency": { "findings": "소유권 이전 이력 사실", "leaseImpact": "갭투자·전세사기 위험과의 관계" },
+    "mortgage_scale": { "findings": "활성 근저당 건수·채권최고액 합계·채권자", "leaseImpact": "담보 규모가 보증금 회수에 미치는 영향" },
+    "senior_rights": { "findings": "선순위 근저당·전세권·임차권 사실", "leaseImpact": "임차인이 후순위가 될 때의 영향" },
+    "provisional_seizure": { "findings": "가압류·가처분 사실 (말소된 과거 이력이 있으면 함께)", "leaseImpact": "채무 분쟁이 보증금 반환에 미치는 위험" },
+    "seizure": { "findings": "압류 사실 (말소된 과거 이력이 있으면 함께)", "leaseImpact": "세금 체납으로 인한 국가 우선 변제 위험" },
+    "auction": { "findings": "경매개시결정 사실", "leaseImpact": "경매 진행 시 보증금 손실 가능성" },
+    "lease_rights": { "findings": "선순위 전세권·임차권 등기 사실", "leaseImpact": "기존 임차인 우선 변제 위험" },
+    "trust": { "findings": "신탁등기 사실", "leaseImpact": "수탁자 동의 없는 임대차의 대항력 위험" },
+    "preliminary": { "findings": "가등기 사실", "leaseImpact": "본등기 시 임차권 소멸 위험" },
+    "surface_rights": { "findings": "지상권·구분지상권 사실", "leaseImpact": "임차 생활의 제한" }
   },
 
   "riskSummary": {
-    "leaseType": "전세 또는 월세 또는 미지정",
-    "level": "낮음 또는 보통 또는 높음",
-    "content": "3~5문장. 위험 요소를 종합하여 leaseType 관점에서 보증금 안전성을 평가. 전세라면 보증금 전액 보호 가능성 중심, 월세라면 소액 보증금 보호 및 최우선변제권 적용 여부 중심으로 서술."
+    "content": "3~5문장. 전세라면 보증금 전액 보호 가능성, 월세라면 소액 보증금 보호와 최우선변제권 중심으로."
   },
 
-  "overallSummary": "5~8문장. 부동산 기본 정보 → 소유권 현황 → 담보·권리 부담 → 법적 위험 → 임차인 보증금 안전성 평가 순으로 서술.",
+  "overallSummary": "5~8문장. 부동산 기본 정보 → 소유권 → 담보·권리 부담 → 법적 위험 → 보증금 안전성 순서로.",
 
   "recommendations": [
-    {
-      "priority": "필수 또는 권장 또는 참고",
-      "title": "확인 사항 제목 (간결하게)",
-      "description": "구체적인 확인 방법과 주의사항"
-    }
+    { "priority": "필수 또는 권장 또는 참고", "title": "확인 사항 제목 (간결하게)", "description": "구체적인 확인 방법과 주의사항" }
   ]
 }
-
-※ checklist와 safetyLevel 필드는 응답에 포함하지 마세요. 시스템이 자동 계산합니다.
-
-frequentTransferWarning: 3년 이내 소유권 이전 2회 이상이면 true (전세사기 갭투자 패턴 주의)
 
 ═══════════════════════════════════════
 [임대차 유형별 recommendations 작성 지침]
@@ -335,6 +261,8 @@ def analyze_deed():
       - leaseType: "전세" | "월세"           (optional)
     Response:
       - analysis: 구조화된 분석 결과 (JSON object)
+
+    추출 → (코드) 판정 → 서술. 흐름과 이유는 시스템 프롬프트 위의 설명을 본다.
     """
     body = request.get_json(silent=True)
     if not body:
@@ -345,6 +273,30 @@ def analyze_deed():
         return jsonify({"error": "'sections' field is required and must be an object"}), 400
 
     lease_type = body.get("leaseType")  # "월세" | "전세" | None
+    sentry_sdk.set_tag("lease_type", lease_type or "미지정")
+
+    # 1. 추출 — 판단 없이 옮겨 적기
+    extract_response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
+            {"role": "user", "content": _build_extract_prompt(sections)},
+        ],
+        temperature=0,
+        seed=42,
+        max_tokens=8000,
+        response_format={"type": "json_object"},
+    )
+    extracted = _parse_json(extract_response, "추출")
+    usage = _usage(extract_response)
+
+    if not extracted.get("isValidDeed", False):
+        return jsonify({"analysis": {"isValidDeed": False, "reason": extracted.get("reason")}, "usage": usage})
+
+    # 2. 판정 — 말소를 지우고 세는 것부터 등급까지 코드가 한다
+    facts = _merge_facts(extracted, _derive_facts(extracted.get("entries"), date.today()))
+    checklist = _compute_checklist(facts, {}, lease_type)
+    safety_level = _compute_safety_level(checklist)
 
     rag_context = ""
     if _rag_collection is not None:
@@ -353,52 +305,25 @@ def analyze_deed():
         except Exception as e:
             logger.warning("RAG 검색 실패 (RAG 없이 분석): %s", e, exc_info=True)
             sentry_sdk.capture_exception(e)
-
-    user_prompt = _build_user_prompt(sections, rag_context, lease_type)
-
-    sentry_sdk.set_tag("lease_type", lease_type or "미지정")
     sentry_sdk.set_tag("rag_used", _rag_collection is not None and bool(rag_context))
-    logger.info("분석 시작 — leaseType=%s, rag_used=%s", lease_type or "미지정", bool(rag_context))
 
-    response = client.chat.completions.create(
+    # 3. 서술 — 확정된 사실만 준다
+    narrative_response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": DEED_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
+            {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
+            {"role": "user", "content": _build_narrative_prompt(facts, checklist, safety_level, lease_type, rag_context)},
         ],
         temperature=0,
         seed=42,
         max_tokens=6000,
         response_format={"type": "json_object"},
     )
+    narrative = _clean_narrative(_parse_json(narrative_response, "서술"))
+    usage = {k: usage[k] + v for k, v in _usage(narrative_response).items()}
 
-    finish_reason = response.choices[0].finish_reason
-    raw_content = response.choices[0].message.content
-
-    if finish_reason == "length":
-        logger.error("LLM 응답이 토큰 한도 초과로 잘림 (finish_reason=length), 응답 길이=%d", len(raw_content))
-        return jsonify({"error": "LLM 응답이 너무 길어 처리할 수 없습니다."}), 500
-
-    try:
-        llm_output = json.loads(raw_content)
-    except json.JSONDecodeError as e:
-        logger.error("LLM 응답 JSON 파싱 실패: %s | 응답 길이=%d | finish_reason=%s", e, len(raw_content), finish_reason)
-        raise
-
-    if not llm_output.get("isValidDeed", False):
-        return jsonify({
-            "analysis": llm_output,
-            "usage": {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            },
-        })
-
-    # checklist status 결정적 계산 (LLM 사실 데이터 + LLM 서술 병합)
-    checklist_analysis = llm_output.get("checklistAnalysis") or {}
-    checklist = _compute_checklist(llm_output, checklist_analysis, lease_type)
-    safety_level = _compute_safety_level(checklist)
+    # 서술을 항목에 붙인다. 상태는 이미 정해졌고 서술은 바꾸지 못한다.
+    checklist = _note_cancelled(_compute_checklist(facts, narrative["checklistAnalysis"], lease_type), facts["cancelledRights"])
 
     # CAUTION / DANGER 일 때만 위험·주의 항목별로 법령·사례 검색 후 중복 제거
     references = {}
@@ -409,51 +334,68 @@ def analyze_deed():
             logger.warning("참조 법령/사례 검색 실패 (생략): %s", e, exc_info=True)
             sentry_sdk.capture_exception(e)
 
-    final_analysis = _build_response(llm_output, checklist, safety_level, references)
-
-    logger.info(
-        "분석 완료 — leaseType=%s, safetyLevel=%s, tokens=%d",
-        lease_type or "미지정",
-        safety_level,
-        response.usage.total_tokens,
+    risk_summary = {
+        "leaseType": lease_type or "미지정",
+        "level": _risk_level(safety_level),
+        "content": narrative["riskSummaryContent"],
+    }
+    final_analysis = _build_response(
+        {**facts, **narrative, "riskSummary": risk_summary}, checklist, safety_level, references,
     )
 
-    return jsonify({
-        "analysis": final_analysis,
-        "usage": {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-            "total_tokens": response.usage.total_tokens,
-        },
-    })
+    logger.info(
+        "분석 완료 — leaseType=%s, safetyLevel=%s, entries=%d, tokens=%d",
+        lease_type or "미지정", safety_level, len(extracted.get("entries") or []), usage["total_tokens"],
+    )
+    return jsonify({"analysis": final_analysis, "usage": usage})
 
 
-# ─────────────────────────────────────────────────────────────
-# 결정적 계산 함수들
-# ─────────────────────────────────────────────────────────────
+def _parse_json(response, stage: str) -> dict:
+    """모델 응답을 JSON 으로 읽는다. 잘렸거나 깨졌으면 조용히 넘기지 않고 실패시킨다."""
+    choice = response.choices[0]
+    if choice.finish_reason == "length":
+        logger.error("LLM %s 응답이 토큰 한도로 잘림, 응답 길이=%d", stage, len(choice.message.content or ""))
+        raise ValueError(f"LLM {stage} 응답이 너무 길어 처리할 수 없습니다.")
+    try:
+        return json.loads(choice.message.content)
+    except json.JSONDecodeError as e:
+        logger.error("LLM %s 응답 JSON 파싱 실패: %s | 응답 길이=%d", stage, e, len(choice.message.content or ""))
+        raise
 
 
+def _usage(response) -> dict:
+    return {
+        "prompt_tokens": response.usage.prompt_tokens,
+        "completion_tokens": response.usage.completion_tokens,
+        "total_tokens": response.usage.total_tokens,
+    }
 
 
-
-
-
-def _build_user_prompt(sections: dict, rag_context: str = "", lease_type: str = None) -> str:
+def _build_extract_prompt(sections: dict) -> str:
     parts = []
     for section_name, lines in sections.items():
         content = "\n".join(lines) if isinstance(lines, list) else str(lines)
         parts.append(f"[{section_name}]\n{content}")
-    sections_text = "\n\n".join(parts)
+    return "다음 등기부등본의 항목을 옮겨 적어 주세요:\n\n" + "\n\n".join(parts)
 
-    lease_line = f"[임대차 유형]\nleaseType: {lease_type}\n\n" if lease_type else ""
 
+def _build_narrative_prompt(facts: dict, checklist: list, safety_level: str, lease_type: str, rag_context: str) -> str:
+    """서술 호출에 줄 확정된 사실. 원문은 넣지 않는다 — 말소된 권리를 다시 살려 쓰지 않게."""
+    confirmed = {
+        "leaseType": lease_type or "미지정",
+        "safetyLevel": safety_level,
+        "propertyInfo": facts.get("propertyInfo"),
+        "ownershipInfo": facts.get("ownershipInfo"),
+        "activeMortgages": facts.get("mortgageInfo"),
+        "activeLegalRisks": facts.get("legalRisks"),
+        "activeOtherRights": facts.get("otherRights"),
+        "cancelledRights": facts.get("cancelledRights"),
+        "checklist": [{"id": c["id"], "item": c["item"], "status": c["status"], "detail": c["detail"]} for c in checklist],
+    }
+    prompt = "[확정된 사실]\n" + json.dumps(confirmed, ensure_ascii=False, indent=1)
     if rag_context:
-        return (
-            f"[관련 법령 및 위험 패턴 참고 자료]\n{rag_context}\n\n"
-            f"{lease_line}"
-            f"위 참고 자료를 바탕으로 다음 등기부등본 데이터를 분석해주세요:\n\n{sections_text}"
-        )
-    return f"{lease_line}다음 등기부등본 데이터를 분석해주세요:\n\n{sections_text}"
+        prompt = f"[관련 법령 및 위험 패턴 참고 자료]\n{rag_context}\n\n" + prompt
+    return prompt + "\n\n위 확정된 사실만 근거로 서술해 주세요."
 
 
 @app.errorhandler(Exception)
