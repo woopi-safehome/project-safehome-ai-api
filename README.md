@@ -216,7 +216,8 @@ LLM 응답이 토큰 한도로 잘리면(`finish_reason == "length"`) 파싱을 
 | `OPENAI_API_KEY` | ✅ | — | 분석·임베딩 모두 사용 |
 | `SENTRY_DSN` | — | 없음 | 미설정 시 Sentry 비활성 |
 | `APP_ENV` | — | `local` | Sentry environment 태그 |
-| `RAG_UPDATE_HOUR` | — | `3` | 자동 업데이트 실행 시각 (0~23) |
+| `RAG_AUTO_UPDATE` | — | `false` | `true` 일 때만 지식 자동 수집을 켠다. 꺼 둔 이유는 [`rag/README.md`](rag/README.md) 자동 갱신 절 |
+| `RAG_UPDATE_HOUR` | — | `3` | 자동 업데이트 실행 시각 (0~23). 자동 수집이 켜져 있을 때만 쓴다 |
 | `LAW_API_KEY` | — | — | 국가법령정보 오픈API 키 |
 
 ---
