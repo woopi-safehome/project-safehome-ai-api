@@ -264,6 +264,21 @@ def _text(value) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+# 등급 코드는 내부 값이다. 사용자 문장에 "DANGER 수준" 처럼 새어 나가면 안 된다.
+_GRADE_LABEL = {"SAFE": "안전", "CAUTION": "주의", "DANGER": "위험"}
+_GRADE_CODE = re.compile(r"\b(SAFE|CAUTION|DANGER)\b")
+
+
+def _grade_label(safety_level: str) -> str:
+    """서술 호출에 넘길 등급. 코드 대신 화면에 보이는 한국어 등급을 준다."""
+    return _GRADE_LABEL.get(safety_level, safety_level)
+
+
+def _korean_grades(text):
+    """모델이 그래도 영문 등급 코드를 쓰면 한국어 등급으로 바꾼다 — 넘기는 값을 바꿔도 모델이 코드를 떠올릴 수 있다."""
+    return _GRADE_CODE.sub(lambda m: f"'{_GRADE_LABEL[m.group(1)]}'", text) if isinstance(text, str) else text
+
+
 def _clean_narrative(narrative) -> dict:
     """
     서술 호출의 결과를 응답이 기대하는 모양으로 맞춘다.
@@ -273,27 +288,28 @@ def _clean_narrative(narrative) -> dict:
     알아볼 수 없는 것은 버린다. 버려진 서술은 조건부 필드의 규칙대로 그 자리를 비운다.
     """
     n = narrative if isinstance(narrative, dict) else {}
+    _ktext = lambda v: _korean_grades(_text(v))  # noqa: E731
 
     analysis = {}
     raw = n.get("checklistAnalysis")
     for key, value in (raw.items() if isinstance(raw, dict) else []):
-        if isinstance(value, dict) and (_text(value.get("findings")) or _text(value.get("leaseImpact"))):
-            analysis[key] = {"findings": _text(value.get("findings")) or "", "leaseImpact": _text(value.get("leaseImpact")) or ""}
-        elif _text(value):
-            analysis[key] = {"findings": _text(value), "leaseImpact": ""}
+        if isinstance(value, dict) and (_ktext(value.get("findings")) or _ktext(value.get("leaseImpact"))):
+            analysis[key] = {"findings": _ktext(value.get("findings")) or "", "leaseImpact": _ktext(value.get("leaseImpact")) or ""}
+        elif _ktext(value):
+            analysis[key] = {"findings": _ktext(value), "leaseImpact": ""}
 
     risk = n.get("riskSummary")
-    risk_content = _text(risk.get("content")) if isinstance(risk, dict) else _text(risk)
+    risk_content = _ktext(risk.get("content")) if isinstance(risk, dict) else _ktext(risk)
 
     recommendations = [
-        {"priority": _text(r.get("priority")) or "참고", "title": _text(r.get("title")), "description": _text(r.get("description")) or ""}
+        {"priority": _ktext(r.get("priority")) or "참고", "title": _ktext(r.get("title")), "description": _ktext(r.get("description")) or ""}
         for r in (n.get("recommendations") if isinstance(n.get("recommendations"), list) else [])
-        if isinstance(r, dict) and _text(r.get("title"))
+        if isinstance(r, dict) and _ktext(r.get("title"))
     ]
 
     return {
-        "analysisSummary": _text(n.get("analysisSummary")),
-        "overallSummary": _text(n.get("overallSummary")),
+        "analysisSummary": _ktext(n.get("analysisSummary")),
+        "overallSummary": _ktext(n.get("overallSummary")),
         "checklistAnalysis": analysis,
         "riskSummaryContent": risk_content,
         "recommendations": recommendations,

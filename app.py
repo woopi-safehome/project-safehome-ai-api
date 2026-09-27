@@ -9,7 +9,7 @@ from flask import Flask, jsonify, request
 from openai import OpenAI
 from dotenv import load_dotenv
 from rag import init_collection, retrieve, retrieve_references
-from judgment import _build_response, _compute_checklist, _compute_safety_level, _clean_narrative, _derive_facts, _merge_facts, _note_cancelled, _risk_level
+from judgment import _build_response, _compute_checklist, _compute_safety_level, _clean_narrative, _derive_facts, _grade_label, _merge_facts, _note_cancelled, _risk_level
 
 load_dotenv()
 
@@ -143,6 +143,7 @@ NARRATIVE_SYSTEM_PROMPT = """당신은 대한민국 부동산 등기부등본 �
    "과거 N건 있었으나 모두 말소되었다"처럼 **반드시 함께 적습니다.** 임차인에게는 과거 체납·분쟁 이력도 참고가 됩니다.
 4. 건수와 금액은 확정된 사실의 숫자를 그대로 씁니다. 다시 세거나 더하지 마세요.
 5. leaseType(전세/월세/미지정)에 맞는 관점으로 씁니다.
+   등급은 사용자에게 보이는 말(안전·주의·위험)로만 씁니다. SAFE·CAUTION·DANGER 같은 영문 코드나 필드 이름을 문장에 쓰지 마세요.
 6. 참고 자료(법령·사례)가 주어지면 서술의 근거로 활용합니다.
 
 ═══════════════════════════════════════
@@ -388,7 +389,8 @@ def _build_narrative_prompt(facts: dict, checklist: list, safety_level: str, lea
     """서술 호출에 줄 확정된 사실. 원문은 넣지 않는다 — 말소된 권리를 다시 살려 쓰지 않게."""
     confirmed = {
         "leaseType": lease_type or "미지정",
-        "safetyLevel": safety_level,
+        # 코드("DANGER")를 넘기면 모델이 그대로 문장에 쓴다. 화면에 보이는 한국어 등급을 준다.
+        "safetyLevel": _grade_label(safety_level),
         "propertyInfo": facts.get("propertyInfo"),
         "ownershipInfo": facts.get("ownershipInfo"),
         "activeMortgages": facts.get("mortgageInfo"),

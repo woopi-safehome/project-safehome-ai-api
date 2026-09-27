@@ -355,3 +355,33 @@ def test_말소된_이력은_상태를_바꾸지_않고_설명에만_붙는다()
 def test_말소_이력이_없으면_설명이_그대로다():
     before = _checklist()
     assert _note_cancelled(before, []) == before
+
+
+# ── 등급 코드가 사용자 문장에 새지 않는다 ─────────────────────────────────────────
+# 서술 호출에 "safetyLevel": "DANGER" 를 넘겼더니 모델이 "DANGER 수준의 위험 신호"라고 썼다 (2026-09-27).
+
+import json
+
+from judgment import _grade_label
+
+
+def test_narrative_gets_korean_grade():
+    assert [_grade_label(g) for g in ("SAFE", "CAUTION", "DANGER")] == ["안전", "주의", "위험"]
+
+
+def test_grade_codes_in_narrative_become_korean():
+    cleaned = _clean_narrative({
+        "analysisSummary": "현재 임대차 계약은 DANGER 수준의 위험 신호가 있습니다.",
+        "riskSummary": {"content": "CAUTION 등급입니다."},
+        "checklistAnalysis": {"seizure": {"findings": "SAFE", "leaseImpact": "영향 없음"}},
+        "recommendations": [{"priority": "필수", "title": "DANGER 대응", "description": "확인"}],
+    })
+    text = json.dumps(cleaned, ensure_ascii=False)
+    for code in ("SAFE", "CAUTION", "DANGER"):
+        assert code not in text, f"등급 코드 {code} 가 사용자 문장에 남았다: {text}"
+    assert cleaned["analysisSummary"] == "현재 임대차 계약은 '위험' 수준의 위험 신호가 있습니다."
+
+
+def test_grade_words_inside_other_words_are_left_alone():
+    # 단어 경계로만 바꾼다. 다른 영문 단어의 일부까지 건드리면 문장이 깨진다.
+    assert _clean_narrative({"analysisSummary": "UNSAFE DANGEROUS"})["analysisSummary"] == "UNSAFE DANGEROUS"
