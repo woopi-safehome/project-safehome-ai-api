@@ -1,10 +1,11 @@
-import hashlib
 import json
 import logging
 import os
 
 import chromadb
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+
+from .data_version import data_version, needs_rebuild
 
 logger = logging.getLogger(__name__)
 
@@ -17,15 +18,6 @@ _CHROMA_PATH = os.path.join(os.path.dirname(__file__), "..", "chroma_db")
 _COLLECTION_NAME = "legal_knowledge"
 
 
-def _data_version() -> str:
-    """데이터셋 파일 내용의 지문. 한 글자만 바뀌어도 달라진다."""
-    h = hashlib.sha256()
-    for filename in _DATASET_FILES:
-        with open(os.path.join(_DATA_DIR, filename), "rb") as f:
-            h.update(f.read())
-    return h.hexdigest()[:16]
-
-
 def init_collection(api_key: str) -> chromadb.Collection:
     """ChromaDB 컬렉션을 초기화하고 반환.
 
@@ -35,14 +27,14 @@ def init_collection(api_key: str) -> chromadb.Collection:
     """
     client = chromadb.PersistentClient(path=_CHROMA_PATH)
     ef = OpenAIEmbeddingFunction(api_key=api_key, model_name="text-embedding-3-small")
-    version = _data_version()
+    version = data_version(_DATA_DIR, _DATASET_FILES)
     metadata = {"hnsw:space": "cosine", "data_version": version}
     collection = client.get_or_create_collection(
         name=_COLLECTION_NAME,
         embedding_function=ef,
         metadata=metadata,
     )
-    if (collection.metadata or {}).get("data_version") != version:
+    if needs_rebuild(collection.metadata, version):
         logger.info("RAG 데이터셋이 바뀌어 저장소를 다시 만든다 (%s → %s)",
                     (collection.metadata or {}).get("data_version"), version)
         client.delete_collection(_COLLECTION_NAME)
